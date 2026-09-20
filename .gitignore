@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# C/C++ generated files
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local configuration and logs
+.env
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
