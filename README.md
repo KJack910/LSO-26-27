@@ -1,86 +1,19 @@
-# Socket Hello World in C
+# Battleship multiplayer in C
 
-Il funzionamento dettagliato e gli esempi per comunicare tra macchine diverse sono descritti in [FUNZIONAMENTO.md](FUNZIONAMENTO.md).
+Client/server TCP in C11 con lobby da terminale. Compilazione e test:
 
-Esempio minimale di comunicazione TCP tra un client e un server scritto in C.
-Il codice usa Winsock su Windows e i socket POSIX su Linux/macOS.
-
-## Requisiti
-
-- CMake 3.15 o superiore
-- Un compilatore C11
-- Linux, Windows o macOS
-
-## Compilazione
-
-Da questa cartella:
-
-```text
+```sh
 cmake -S . -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-Gli eseguibili vengono creati nella cartella `build/` (su Visual Studio, nella relativa sottocartella di configurazione).
+Avviare il server (`./build/server [indirizzo-bind] [porta]`, predefiniti `0.0.0.0:5000`) e poi uno o più client (`./build/client [host] [porta]`). Il nome e l'ID numerico del giocatore vivono solo fino alla chiusura del server. Il protocollo TCP usa righe terminate da newline; comandi e risposte sono descritti in `FUNZIONAMENTO.md`.
 
-## Esecuzione su Linux/macOS
+Il server gestisce richieste concorrenti con thread (massimo 64 worker; timeout di rete 20 secondi) e protegge lo stato condiviso con un mutex. Non viene creato alcun registro persistente dei giocatori: nomi, ID e sessioni sono volatili e si azzerano all'arresto del server. Il nome non è autenticato: si tratta di un prototipo didattico, non di un servizio sicuro per Internet.
 
-Terminale 1:
+Ogni giocatore può avere una sola sessione attiva: dopo la creazione l'host entra direttamente nella lobby della sessione; l'ospite richiede l'accesso dalla lobby principale e l'host decide lì se accettarlo. Le sessioni hanno ID del formato `S00001` (lettera S e cinque cifre). Dopo l'accettazione, il posizionamento guidato delle navi e la conferma di prontezza avvengono prima della partita. Le due griglie sono affiancate e si aggiornano a ogni azione. `Q` è resa e sconfitta; dopo la partita `D` permette all'host la rivincita o un nuovo avversario, mentre `E` esce dalla sessione. Il server valida posizionamenti, turni, colpi ripetuti e vittoria.
 
-```text
-./build/server
-```
+Il codice è organizzato in moduli: `server.c` per socket/thread, `server_state.c` per stato e comandi, `client_net.c` per richieste TCP, `client_ui.c` per menu e griglie e `game.c` per le regole della plancia.
 
-Terminale 2:
-
-```text
-./build/client
-```
-
-## Esecuzione su Windows
-
-Prompt dei comandi o PowerShell:
-
-```text
-build\\Debug\\server.exe
-build\\Debug\\client.exe
-```
-
-Con generatori che producono direttamente gli eseguibili, usare il percorso creato da CMake.
-
-## Parametri
-
-Server:
-
-```text
-server [host] [porta] [--once]
-```
-
-Il server ascolta di default su `0.0.0.0:5000` e continua ad accettare client.
-Con `--once` gestisce una connessione e termina; è utile per i test.
-
-Client:
-
-```text
-client [host] [porta] [messaggio]
-```
-
-Il client usa di default `127.0.0.1:5000` e invia `Hello from client!`.
-
-Per collegare due computer nella stessa rete:
-
-```text
-# Computer server
-server 0.0.0.0 5000
-
-# Computer client: sostituire l'IP
-client 192.168.1.100 5000
-```
-
-Su Windows potrebbe essere necessario consentire l'eseguibile nel firewall per la porta TCP scelta.
-
-## Protocollo
-
-- TCP su IPv4
-- Testo UTF-8
-- Ogni messaggio termina con `\\n`
-- Risposta del server: `Hello from server!`
+**Limiti:** gli ID sessione sono univoci solo durante l'esecuzione del server, non UUID standard né persistenti. Mancano autenticazione, TLS e rilevamento delle disconnessioni improvvise: il trasferimento host avviene solo con `LEAVE` esplicito dopo la partita. Non è ancora presente il flusso guidato per attendere/riconnettere un giocatore caduto. Windows/macOS non sono stati verificati in questo ambiente.

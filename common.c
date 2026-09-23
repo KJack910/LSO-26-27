@@ -61,7 +61,7 @@ int receive_line(socket_t socket_fd, char *buffer, size_t buffer_size) {
     while (used < buffer_size - 1) {
         int received = recv(socket_fd, buffer + used, (int)(buffer_size - 1 - used), 0);
         if (received == SOCKET_ERROR || received == 0) {
-            return used == 0 ? -1 : 0;
+            return -1;
         }
 
         used += (size_t)received;
@@ -74,5 +74,5 @@ int receive_line(socket_t socket_fd, char *buffer, size_t buffer_size) {
     }
 
     buffer[buffer_size - 1] = '\0';
-    return 0;
+    return -1;
 }
