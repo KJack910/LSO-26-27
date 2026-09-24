@@ -396,14 +396,26 @@ static const char *session_phase(const Session *session, int who) {
 }
 
 static void encode_grid(const GameBoard *board, int target, char grid[GAME_SIZE * GAME_SIZE + 1]) {
+    /* Ship initials ordered by placement: 5=Portaerei, 4=Corazzata, 3=Sottomarino, 3=Incrociatore, 2=Cacciatorpediniere */
+    static const char INITIALS[GAME_MAX_SHIPS] = {'P', 'C', 'S', 'I', 'K'};
     int row, col, offset = 0;
     for (row = 0; row < GAME_SIZE; ++row) {
         for (col = 0; col < GAME_SIZE; ++col) {
             unsigned char shot = (unsigned char)board->shots[row][col];
-            if (shot == 2) grid[offset++] = 'X';
-            else if (shot == 1) grid[offset++] = 'o';
-            else if (!target && board->cells[row][col]) grid[offset++] = 'S';
-            else grid[offset++] = '.';
+            unsigned char sid  = board->ship_ids[row][col];
+            char init = (sid > 0 && sid <= GAME_MAX_SHIPS) ? INITIALS[sid - 1] : 'S';
+            if (shot == 2) {
+                /* Hit cell: lowercase initial of the ship */
+                grid[offset++] = (char)(init + 32);
+            } else if (shot == 1) {
+                /* Water shot (miss) */
+                grid[offset++] = 'o';
+            } else if (!target && board->cells[row][col]) {
+                /* Intact ship cell – shown only on own grid */
+                grid[offset++] = init;
+            } else {
+                grid[offset++] = '.';
+            }
         }
     }
     grid[offset] = '\0';

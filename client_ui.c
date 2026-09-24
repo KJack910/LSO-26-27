@@ -6,12 +6,42 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+static void enable_ansi(void) {
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode))
+        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+#else
+static void enable_ansi(void) {}
+#endif
+
+/* ANSI colours – one per ship type */
+#define COL_RESET  "\033[0m"
+#define COL_RED    "\033[31m"  /* hit cells      */
+#define COL_CYAN   "\033[36m"  /* P – Portaerei  */
+#define COL_GREEN  "\033[32m"  /* C – Corazzata  */
+#define COL_YELLOW "\033[33m"  /* S – Sottomarino*/
+#define COL_MAGENTA "\033[35m"  /* I - Incrociatore*/
+#define COL_BLUE   "\033[34m"  /* K – Cacciatorpediniere */
+
 #define INPUT_CAPACITY 128
 #define RESPONSE_CAPACITY 2048
 #define GRID_SIDE 10
 #define GRID_CELLS 100
 #define FLEET_COUNT 5
 #define NAME_CAPACITY 64
+
+/* Ship names in placement order (5,4,3,3,2) */
+static const char *SHIP_NAMES[FLEET_COUNT] = {
+    "Portaerei  (P, 5 caselle)",
+    "Corazzata  (C, 4 caselle)",
+    "Sottomarino(S, 3 caselle)",
+    "Incrociatore(I, 3 caselle)",
+    "Cacciatorpediniere(K, 2 caselle)"
+};
 
 static const int fleet[FLEET_COUNT] = {5, 4, 3, 3, 2};
 
@@ -67,18 +97,56 @@ static void print_lobby(const char *host, const char *port) {
     } while (entry);
 }
 
+/* Return the ANSI colour for a ship cell character.
+ * Uppercase = intact ship, lowercase = hit ship (shown in red).
+ * '.' = water, 'o' = missed shot, 'X' = hit on target grid. */
+static const char *cell_color(char ch) {
+    switch (ch) {
+        case 'P': return COL_CYAN;
+        case 'C': return COL_GREEN;
+        case 'S': return COL_YELLOW;
+        case 'I': return COL_MAGENTA;
+        case 'K': return COL_BLUE;
+        /* lowercase = hit cell on own grid */
+        case 'p': case 'c': case 's': case 'i': case 'k':
+            return COL_RED;
+        default:  return COL_RESET;
+    }
+}
+
 static void print_grids(const char *own, const char *target) {
     int row, col;
     puts("\n  LA TUA FLOTTA                         BERSAGLI SULLA GRIGLIA AVVERSARIA");
     puts("     0 1 2 3 4 5 6 7 8 9                  0 1 2 3 4 5 6 7 8 9");
     for (row = 0; row < GRID_SIDE; ++row) {
         printf(" %2d  ", row);
-        for (col = 0; col < GRID_SIDE; ++col) printf("%c ", own[row * GRID_SIDE + col]);
+        for (col = 0; col < GRID_SIDE; ++col) {
+            char ch = own[row * GRID_SIDE + col];
+            if (ch >= 'a' && ch <= 'z') {
+                /* Hit ship cell: always show X in red */
+                printf("%sX%s ", COL_RED, COL_RESET);
+            } else {
+                /* Intact ship (colored letter), water miss (o), empty (.) */
+                printf("%s%c%s ", cell_color(ch), ch, COL_RESET);
+            }
+        }
         printf("             %2d  ", row);
-        for (col = 0; col < GRID_SIDE; ++col) printf("%c ", target[row * GRID_SIDE + col]);
+        for (col = 0; col < GRID_SIDE; ++col) {
+            char ch = target[row * GRID_SIDE + col];
+            if (ch == 'X')      printf("%sX%s ", COL_RED, COL_RESET); /* hit */
+            else if (ch == 'o') printf("o ");                          /* water */
+            else                printf(". ");                          /* unknown */
+        }
         putchar('\n');
     }
-    puts("Legenda: S nave, X colpita, o acqua colpita, . acqua inesplorata");
+    /* Coloured legend */
+    printf("Navi: %sP%s=Portaerei  %sC%s=Corazzata  %sS%s=Sottomarino  %sI%s=Incrociatore  %sK%s=Cacciatorpediniere  |  %sX%s=Colpita  o=Acqua\n",
+           COL_CYAN,    COL_RESET,
+           COL_GREEN,   COL_RESET,
+           COL_YELLOW,  COL_RESET,
+           COL_MAGENTA, COL_RESET,
+           COL_BLUE,    COL_RESET,
+           COL_RED,     COL_RESET);
 }
 
 static int fetch_view(const char *host, const char *port, const char *pid, const char *sid,
@@ -147,17 +215,23 @@ static int place_fleet(const char *host, const char *port, const char *pid, cons
     while (*placed < FLEET_COUNT) {
         int row, col;
         char orientation;
-        printf("\nPosizionamento nave %d/%d (lunghezza %d). Coordinate 0-9.\n",
-               *placed + 1, FLEET_COUNT, fleet[*placed]);
-        if (!read_input("Riga colonna orientamento H/V (es. 2 1 H): ", input, sizeof(input))) return 0;
-        if (sscanf(input, "%d %d %c", &row, &col, &orientation) != 3) {
-            puts("Formato non valido.");
+        printf("\n--- Nave %d/5: %s ---\n", *placed + 1, SHIP_NAMES[*placed]);
+        puts("Inserisci riga, colonna e orientamento (H=orizzontale, V=verticale).");
+        if (!read_input("Es. \"2 3 H\": ", input, sizeof(input))) return 0;
+        char extra;
+        if (sscanf(input, "%d %d %c %c", &row, &col, &orientation, &extra) != 3) {
+            puts("Errore: devi inserire SOLO riga, colonna e orientamento (es. 2 3 H).");
             continue;
         }
+        if (orientation >= 'a' && orientation <= 'z') orientation -= 32; /* uppercase */
         snprintf(command, sizeof(command), "PLACE|%s|%s|%d|%d|%c|%d",
                  pid, sid, row, col, orientation, fleet[*placed]);
-        if (send_simple(host, port, command)) ++*placed;
-        else puts("Riprova con una posizione valida.");
+        if (send_simple(host, port, command)) {
+            printf("Nave posizionata.\n");
+            ++*placed;
+        } else {
+            puts("Posizione non valida (fuori griglia, sovrapposizione, orientamento errato). Riprova.");
+        }
     }
     snprintf(command, sizeof(command), "READY|%s|%s", pid, sid);
     return send_simple(host, port, command);
@@ -166,6 +240,7 @@ static int place_fleet(const char *host, const char *port, const char *pid, cons
 static void session_screen(const char *host, const char *port, const char *pid,
                            const char *player_name, const char *sid, int is_host) {
     int placed = 0;
+    char prev_phase[32] = "";  /* tracks previous phase to detect rematch transition */
     char input[INPUT_CAPACITY], command[INPUT_CAPACITY];
     char phase[32], role[16], turn[NAME_CAPACITY], own[GRID_CELLS + 1], target[GRID_CELLS + 1];
     for (;;) {
@@ -173,12 +248,23 @@ static void session_screen(const char *host, const char *port, const char *pid,
         int pending = 0, accepted = 0, started = 0, over = 0;
         if (!fetch_status(host, port, pid, sid, host_name, guest_name,
                           &pending, &accepted, &started, &over)) {
-            puts("Non sei più membro della sessione o il server non risponde.");
+            puts("Non sei piu' membro della sessione o il server non risponde.");
             return;
         }
         if (!fetch_view(host, port, pid, sid, phase, sizeof(phase), role, sizeof(role),
                         turn, sizeof(turn), own, target)) return;
         is_host = strcmp(role, "HOST") == 0;
+
+        /* Bug fix: after a rematch the server resets ship counts to 0, but the
+         * client's 'placed' counter from the previous game would still be 5.
+         * Detect the FINISHED -> PLACEMENT transition and reset placed=0 so
+         * the player is asked to position all ships again for the new game. */
+        if (strcmp(prev_phase, "FINISHED") == 0 &&
+            (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0)) {
+            placed = 0;
+        }
+        snprintf(prev_phase, sizeof(prev_phase), "%s", phase);
+
 
         if (strcmp(phase, "REQUEST_PENDING") == 0 && is_host) {
             printf("\n%s chiede di unirsi alla sessione.\n", guest_name);
@@ -268,6 +354,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
 int client_run(const char *host, const char *port) {
     char name[INPUT_CAPACITY], command[RESPONSE_CAPACITY], response[RESPONSE_CAPACITY];
     char player_id[32], choice[INPUT_CAPACITY], session_id[16];
+    enable_ansi();
     if (!read_input("Nome giocatore: ", name, sizeof(name)) || !name[0] || strchr(name, '|')) {
         puts("Nome non valido.");
         return 1;

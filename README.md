@@ -2,13 +2,21 @@
 
 Client/server TCP in C11 con lobby da terminale. Compilazione e test:
 
+**Linux / macOS:**
 ```sh
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Avviare il server (`./build/server [indirizzo-bind] [porta]`, predefiniti `0.0.0.0:5000`) e poi uno o più client (`./build/client [host] [porta]`). Il nome e l'ID numerico del giocatore vivono solo fino alla chiusura del server. Il protocollo TCP usa righe terminate da newline; comandi e risposte sono descritti in `FUNZIONAMENTO.md`.
+**Windows (PowerShell / Prompt dei comandi):**
+```powershell
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Avviare il server (`./build/server` su Linux/macOS, `.\build\server.exe` su Windows. Indirizzo e porta opzionali predefiniti `0.0.0.0:5000`) e poi uno o più client (`./build/client` su Linux/macOS, `.\build\client.exe` su Windows). Il nome e l'ID numerico del giocatore vivono solo fino alla chiusura del server. Il protocollo TCP usa righe terminate da newline; comandi e risposte sono descritti in `FUNZIONAMENTO.md`.
 
 Il server gestisce richieste concorrenti con thread (massimo 64 worker; timeout di rete 20 secondi) e protegge lo stato condiviso con un mutex. Non viene creato alcun registro persistente dei giocatori: nomi, ID e sessioni sono volatili e si azzerano all'arresto del server. Il nome non è autenticato: si tratta di un prototipo didattico, non di un servizio sicuro per Internet.
 

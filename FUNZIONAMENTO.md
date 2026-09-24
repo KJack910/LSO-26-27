@@ -2,10 +2,20 @@
 
 ## Avvio
 
+**Linux / macOS:**
 ```sh
 cmake -S . -B build && cmake --build build
 ./build/server [indirizzo-bind] [porta] # predefiniti 0.0.0.0:5000
 ./build/client [host] [porta]             # predefiniti 127.0.0.1:5000
+ctest --test-dir build --output-on-failure
+```
+
+**Windows (PowerShell / Prompt dei comandi):**
+```powershell
+cmake -S . -B build
+cmake --build build
+.\build\server.exe [indirizzo-bind] [porta] # predefiniti 0.0.0.0:5000
+.\build\client.exe [host] [porta]           # predefiniti 127.0.0.1:5000
 ctest --test-dir build --output-on-failure
 ```
 
@@ -20,7 +30,7 @@ Campi separati da `|`; coordinate 0-9. `pid` è l'ID numerico assegnato dal serv
 - `CREATE|pid` → `OK|sid`; rifiuta se il giocatore ha già una sessione attiva.
 - `JOIN|pid|sid` → registra la richiesta; il proprietario deve inviare `DECIDE|host-pid|sid|1` (accetta) o `...|0` (rifiuta). Un giocatore già occupato non può unirsi a un'altra sessione.
 - `STATUS|pid|sid` → host, ospite e indicatori pending/accepted/started/over.
-- `VIEW|pid|sid` → `OK|fase|ruolo|turno|griglia-propria|bersagli`; le due stringhe griglia hanno 100 simboli ciascuna, in ordine per riga. `S` nave, `X` colpito, `o` acqua colpita, `.` cella non colpita. Le navi avversarie non vengono esposte.
+- `VIEW|pid|sid` → `OK|fase|ruolo|turno|griglia-propria|bersagli`; le due stringhe griglia hanno 100 simboli ciascuna, in ordine per riga. Nella griglia propria ogni cella nave intatta è indicata con una lettera minuscola (`a`=portaerei/5, `b`=corazzata/4, `c`=incrociatore/3, `d`=sottomarino/3, `e`=cacciatorpediniere/2); la stessa lettera in maiuscolo indica una cella colpita. `o` acqua colpita, `.` cella non colpita. Nella griglia bersaglio le navi avversarie non vengono esposte: solo `X` colpito, `o` mancato, `.` inesplorato. Il client interpreta le lettere e disegna ogni nave con frecce e lunghezza: `<L … L>` orizzontale, `^L / |L / vL` verticale, `[L]` isolata (dove L è la lunghezza della nave).
 - `PLACE|pid|sid|riga|colonna|H-or-V|lunghezza` → colloca in ordine la flotta 5,4,3,3,2. Il server rifiuta sovrapposizioni, orientamenti/coordinate non validi e lunghezze fuori ordine.
 - `READY|pid|sid` → avvia quando entrambi hanno collocato la flotta e sono pronti.
 - `SHOT|pid|sid|riga|colonna` → consentito solo al giocatore di turno; rifiuta colpi ripetuti e coordinate errate, restituisce MISS/HIT/SUNK e WIN a fine partita.
