@@ -122,7 +122,7 @@ static void print_grids(const char *own, const char *target) {
         printf(" %2d  ", row);
         for (col = 0; col < GRID_SIDE; ++col) {
             char ch = own[row * GRID_SIDE + col];
-            if (ch >= 'a' && ch <= 'z') {
+            if (ch >= 'a' && ch <= 'z' && ch != 'o') {
                 /* Hit ship cell: always show X in red */
                 printf("%sX%s ", COL_RED, COL_RESET);
             } else {
@@ -133,9 +133,9 @@ static void print_grids(const char *own, const char *target) {
         printf("             %2d  ", row);
         for (col = 0; col < GRID_SIDE; ++col) {
             char ch = target[row * GRID_SIDE + col];
-            if (ch == 'X')      printf("%sX%s ", COL_RED, COL_RESET); /* hit */
-            else if (ch == 'o') printf("o ");                          /* water */
-            else                printf(". ");                          /* unknown */
+            if (ch >= 'a' && ch <= 'z' && ch != 'o') printf("%sX%s ", COL_RED, COL_RESET); /* hit */
+            else if (ch == 'o')                      printf("o ");                          /* water */
+            else                                     printf(". ");                          /* unknown */
         }
         putchar('\n');
     }
