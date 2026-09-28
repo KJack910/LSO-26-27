@@ -1,11 +1,23 @@
 #include "client_net.h"
 
 #include "common.h"
+#include "server_state.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+typedef DWORD presence_thread_return_t;
+#else
+#include <pthread.h>
+#include <unistd.h>
+typedef void *presence_thread_return_t;
+#endif
+
 #define CLIENT_MESSAGE_CAPACITY 1024
+#define PRESENCE_TEXT_CAPACITY 128
 
 static socket_t connect_to_server(const char *host, const char *port) {
     struct addrinfo hints;
@@ -72,4 +84,82 @@ int client_request(
 
     close_socket(connection);
     return result;
+}
+
+struct ClientPresence {
+    char host[PRESENCE_TEXT_CAPACITY];
+    char port[PRESENCE_TEXT_CAPACITY];
+    char pid[PRESENCE_TEXT_CAPACITY];
+    char sid[PRESENCE_TEXT_CAPACITY];
+    volatile int running;
+#ifdef _WIN32
+    HANDLE thread;
+#else
+    pthread_t thread;
+#endif
+};
+
+static presence_thread_return_t presence_worker(void *raw) {
+    ClientPresence *presence = (ClientPresence *)raw;
+    char request[CLIENT_MESSAGE_CAPACITY];
+    char response[CLIENT_MESSAGE_CAPACITY];
+    int waited;
+
+    while (presence->running) {
+        snprintf(request, sizeof(request), "HEARTBEAT|%s|%s", presence->pid, presence->sid);
+        (void)client_request(presence->host, presence->port, request,
+                             response, sizeof(response));
+        for (waited = 0; waited < SERVER_HEARTBEAT_INTERVAL_SECONDS && presence->running; ++waited) {
+#ifdef _WIN32
+            Sleep(1000);
+#else
+            sleep(1);
+#endif
+        }
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+int client_presence_start(const char *host, const char *port,
+                          const char *pid, const char *sid,
+                          ClientPresence **out_presence) {
+    ClientPresence *presence;
+    if (!host || !port || !pid || !sid || !out_presence) return -1;
+    presence = (ClientPresence *)calloc(1, sizeof(*presence));
+    if (!presence) return -1;
+    snprintf(presence->host, sizeof(presence->host), "%s", host);
+    snprintf(presence->port, sizeof(presence->port), "%s", port);
+    snprintf(presence->pid, sizeof(presence->pid), "%s", pid);
+    snprintf(presence->sid, sizeof(presence->sid), "%s", sid);
+    presence->running = 1;
+#ifdef _WIN32
+    presence->thread = CreateThread(NULL, 0, presence_worker, presence, 0, NULL);
+    if (!presence->thread) {
+        free(presence);
+        return -1;
+    }
+#else
+    if (pthread_create(&presence->thread, NULL, presence_worker, presence) != 0) {
+        free(presence);
+        return -1;
+    }
+#endif
+    *out_presence = presence;
+    return 0;
+}
+
+void client_presence_stop(ClientPresence *presence) {
+    if (!presence) return;
+    presence->running = 0;
+#ifdef _WIN32
+    WaitForSingleObject(presence->thread, INFINITE);
+    CloseHandle(presence->thread);
+#else
+    pthread_join(presence->thread, NULL);
+#endif
+    free(presence);
 }

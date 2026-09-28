@@ -151,9 +151,10 @@ static void print_grids(const char *own, const char *target) {
 
 static int fetch_view(const char *host, const char *port, const char *pid, const char *sid,
                       char *phase, size_t phase_size, char *role, size_t role_size,
-                      char *turn, size_t turn_size, char *own, char *target) {
+                      char *turn, size_t turn_size, char *own, char *target,
+                      char *winner, size_t winner_size) {
     char command[INPUT_CAPACITY], response[RESPONSE_CAPACITY];
-    char *fields[6], *cursor;
+    char *fields[7], *cursor;
     snprintf(command, sizeof(command), "VIEW|%s|%s", pid, sid);
     if (!request_server(host, port, command, response, sizeof(response)) || strncmp(response, "OK|", 3)) {
         if (response[0]) printf("Sessione non disponibile: %s\n", response);
@@ -161,7 +162,7 @@ static int fetch_view(const char *host, const char *port, const char *pid, const
     }
     fields[0] = response;
     cursor = response;
-    for (int i = 1; i < 6; ++i) {
+    for (int i = 1; i < 7; ++i) {
         cursor = strchr(cursor, '|');
         if (!cursor) return 0;
         *cursor++ = '\0';
@@ -173,7 +174,10 @@ static int fetch_view(const char *host, const char *port, const char *pid, const
     snprintf(turn, turn_size, "%s", fields[3]);
     memcpy(own, fields[4], GRID_CELLS + 1);
     memcpy(target, fields[5], GRID_CELLS + 1);
-    printf("\nSessione %s | Fase: %s | Ruolo: %s | Turno: %s\n", sid, phase, role, turn);
+    snprintf(winner, winner_size, "%s", fields[6]);
+    printf("\nSessione %s | Fase: %s | Ruolo: %s | Turno: %s", sid, phase, role, turn);
+    if (strcmp(winner, "-") != 0) printf(" | Vincitore: %s", winner);
+    putchar('\n');
     print_grids(own, target);
     return 1;
 }
@@ -242,17 +246,23 @@ static void session_screen(const char *host, const char *port, const char *pid,
     int placed = 0;
     char prev_phase[32] = "";  /* tracks previous phase to detect rematch transition */
     char input[INPUT_CAPACITY], command[INPUT_CAPACITY];
-    char phase[32], role[16], turn[NAME_CAPACITY], own[GRID_CELLS + 1], target[GRID_CELLS + 1];
+    char phase[32], role[16], turn[NAME_CAPACITY], winner[NAME_CAPACITY];
+    char own[GRID_CELLS + 1], target[GRID_CELLS + 1];
+    ClientPresence *presence = NULL;
+    if (client_presence_start(host, port, pid, sid, &presence) != 0) {
+        puts("Impossibile avviare il monitor di connessione della partita.");
+        return;
+    }
     for (;;) {
         char host_name[NAME_CAPACITY] = "", guest_name[NAME_CAPACITY] = "";
         int pending = 0, accepted = 0, started = 0, over = 0;
         if (!fetch_status(host, port, pid, sid, host_name, guest_name,
                           &pending, &accepted, &started, &over)) {
             puts("Non sei piu' membro della sessione o il server non risponde.");
-            return;
+            goto session_done;
         }
         if (!fetch_view(host, port, pid, sid, phase, sizeof(phase), role, sizeof(role),
-                        turn, sizeof(turn), own, target)) return;
+                        turn, sizeof(turn), own, target, winner, sizeof(winner))) goto session_done;
         is_host = strcmp(role, "HOST") == 0;
 
         /* Bug fix: after a rematch the server resets ship counts to 0, but the
@@ -268,7 +278,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
 
         if (strcmp(phase, "REQUEST_PENDING") == 0 && is_host) {
             printf("\n%s chiede di unirsi alla sessione.\n", guest_name);
-            if (!read_input("Accettare? (s/n): ", input, sizeof(input))) return;
+            if (!read_input("Accettare? (s/n): ", input, sizeof(input))) goto session_done;
             snprintf(command, sizeof(command), "DECIDE|%s|%s|%d", pid, sid,
                      input[0] == 's' || input[0] == 'S');
             send_simple(host, port, command);
@@ -276,43 +286,44 @@ static void session_screen(const char *host, const char *port, const char *pid,
         }
         if (strcmp(phase, "WAITING_REQUEST") == 0) {
             puts("Lobby della sessione: condividi l'ID con l'altro giocatore.");
-            if (!read_input("Premi INVIO per aggiornare la lobby: ", input, sizeof(input))) return;
+            if (!read_input("Premi INVIO per aggiornare la lobby: ", input, sizeof(input))) goto session_done;
             continue;
         }
         if (strcmp(phase, "WAITING_ACCEPT") == 0) {
             puts("Richiesta inviata. Attendi l'accettazione dell'host.");
-            if (!read_input("Premi INVIO per verificare: ", input, sizeof(input))) return;
+            if (!read_input("Premi INVIO per verificare: ", input, sizeof(input))) goto session_done;
             continue;
         }
         if (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0) {
             if (placed < FLEET_COUNT && !place_fleet(host, port, pid, sid, &placed)) continue;
             puts("Flotta pronta: in attesa dell'avversario.");
-            if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) return;
+            if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) goto session_done;
+            continue;
+        }
+        if (strcmp(phase, "PAUSED") == 0) {
+            puts("\nPARTITA IN PAUSA: l'avversario si e' disconnesso. Attendo la riconnessione per 1 minuto.");
+            if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) goto session_done;
             continue;
         }
         if (strcmp(phase, "PLAYING") == 0) {
             if (strcmp(turn, player_name) != 0) {
                 puts("Turno dell'avversario.");
-                if (!read_input("Premi INVIO per aggiornare (Q per arrenderti): ", input, sizeof(input))) return;
+                if (!read_input("Premi INVIO per aggiornare (Q per arrenderti): ", input, sizeof(input))) goto session_done;
                 if (input[0] == 'q' || input[0] == 'Q') {
                     snprintf(command, sizeof(command), "SURRENDER|%s|%s", pid, sid);
                     if (send_simple(host, port, command)) {
-                        snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
-                        send_simple(host, port, command);
-                        puts("Ti sei arreso: partita persa.");
-                        return;
+                        puts("Ti sei arreso: partita persa. La sessione resta disponibile per il risultato e la rivincita.");
+                        continue;
                     }
                 }
                 continue;
             }
-            if (!read_input("Tiro riga colonna (es. 4 7), oppure Q per resa: ", input, sizeof(input))) return;
+            if (!read_input("Tiro riga colonna (es. 4 7), oppure Q per resa: ", input, sizeof(input))) goto session_done;
             if (input[0] == 'q' || input[0] == 'Q') {
                 snprintf(command, sizeof(command), "SURRENDER|%s|%s", pid, sid);
                 if (send_simple(host, port, command)) {
-                    snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
-                    send_simple(host, port, command);
-                    puts("Ti sei arreso: partita persa.");
-                    return;
+                    puts("Ti sei arreso: partita persa. La sessione resta disponibile per il risultato e la rivincita.");
+                    continue;
                 }
                 continue;
             }
@@ -330,25 +341,28 @@ static void session_screen(const char *host, const char *port, const char *pid,
         if (strcmp(phase, "FINISHED") == 0) {
             if (is_host) {
                 puts("\n=== PARTITA TERMINATA ===\n  D  Rivincita o attesa di un nuovo avversario\n  E  Esci dalla sessione");
-                if (!read_input("Scelta: ", input, sizeof(input))) return;
+                if (!read_input("Scelta: ", input, sizeof(input))) goto session_done;
                 if (input[0] == 'd' || input[0] == 'D') {
                     char decision[INPUT_CAPACITY];
                     puts("  1  Rivincita\n  2  Nuovo avversario");
-                    if (!read_input("Scelta: ", decision, sizeof(decision))) return;
+                    if (!read_input("Scelta: ", decision, sizeof(decision))) goto session_done;
                     snprintf(command, sizeof(command), "REMATCH|%s|%s|%s", pid, sid,
                              decision[0] == '1' ? "same" : "new");
                     if (send_simple(host, port, command)) placed = 0;
                 } else if (input[0] == 'e' || input[0] == 'E') {
                     snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
-                    if (send_simple(host, port, command)) return;
+                    if (send_simple(host, port, command)) goto session_done;
                 }
             } else {
                 puts("Partita terminata. Attendi la decisione dell'host.");
-                if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) return;
-                if (over && !accepted) return;
+                if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) goto session_done;
+                if (over && !accepted) goto session_done;
             }
         }
     }
+
+session_done:
+    client_presence_stop(presence);
 }
 
 int client_run(const char *host, const char *port) {
@@ -372,6 +386,12 @@ int client_run(const char *host, const char *port) {
         snprintf(name, sizeof(name), "%s", separator + 1);
     }
     printf("\nBenvenuto, %s. ID giocatore: %s\n", name, player_id);
+    snprintf(command, sizeof(command), "RESUME|%s", player_id);
+    if (request_server(host, port, command, response, sizeof(response)) && !strncmp(response, "OK|", 3)) {
+        snprintf(session_id, sizeof(session_id), "%s", response + 3);
+        puts("Sessione attiva trovata: riconnessione automatica.");
+        session_screen(host, port, player_id, name, session_id, 0);
+    }
     for (;;) {
         print_lobby(host, port);
         puts("\nMENU PRINCIPALE\n  1  Crea una partita\n  2  Aggiorna la lobby\n  3  Unisciti a una sessione\n  0  Esci");

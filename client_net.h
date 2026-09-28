@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+typedef struct ClientPresence ClientPresence;
+
 int client_request(
     const char *host,
     const char *port,
@@ -10,5 +12,10 @@ int client_request(
     char *response,
     size_t response_size
 );
+
+int client_presence_start(const char *host, const char *port,
+                          const char *pid, const char *sid,
+                          ClientPresence **presence);
+void client_presence_stop(ClientPresence *presence);
 
 #endif

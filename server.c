@@ -53,6 +53,26 @@ static void release_worker(void) {
     worker_mutex_unlock(&worker_lock);
 }
 
+#ifdef _WIN32
+static DWORD WINAPI maintenance_worker(LPVOID raw) {
+    (void)raw;
+    for (;;) {
+        Sleep(1000);
+        server_state_maintenance();
+    }
+    return 0;
+}
+#else
+static void *maintenance_worker(void *raw) {
+    (void)raw;
+    for (;;) {
+        sleep(1);
+        server_state_maintenance();
+    }
+    return NULL;
+}
+#endif
+
 static void configure_client_timeout(socket_t socket_fd) {
 #ifdef _WIN32
     DWORD timeout_ms = CLIENT_TIMEOUT_SECONDS * 1000;
@@ -123,6 +143,11 @@ int main(int argc, char **argv) {
     const char *host = argc > 1 ? argv[1] : NULL;
     const char *port = argc > 2 ? argv[2] : "5000";
     socket_t listener;
+#ifdef _WIN32
+    HANDLE maintenance_thread;
+#else
+    pthread_t maintenance_thread;
+#endif
 
     if (argc > 3) {
         fprintf(stderr, "Uso: %s [indirizzo-bind] [porta]\n", argv[0]);
@@ -145,6 +170,23 @@ int main(int argc, char **argv) {
         network_cleanup();
         return EXIT_FAILURE;
     }
+#ifdef _WIN32
+    if (!start_thread(&maintenance_thread, maintenance_worker, NULL)) {
+        fprintf(stderr, "Could not start session maintenance thread\n");
+        close_socket(listener);
+        network_cleanup();
+        return EXIT_FAILURE;
+    }
+    CloseHandle(maintenance_thread);
+#else
+    if (pthread_create(&maintenance_thread, NULL, maintenance_worker, NULL) != 0) {
+        fprintf(stderr, "Could not start session maintenance thread\n");
+        close_socket(listener);
+        network_cleanup();
+        return EXIT_FAILURE;
+    }
+    pthread_detach(maintenance_thread);
+#endif
 
     printf("Battleship server listening on %s:%s\n", host ? host : "0.0.0.0", port);
     fflush(stdout);

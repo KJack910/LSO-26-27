@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -50,6 +51,10 @@ typedef struct {
     int ready[2];
     int turn;
     int over;
+    int paused;
+    int connected[2];
+    time_t last_seen[2];
+    time_t paused_at;
     unsigned winner;
     char id[ID_LEN];
     unsigned host;
@@ -88,6 +93,65 @@ static int session_slot(const Session *session, unsigned pid) {
     return -1;
 }
 
+static void touch_player(Session *session, unsigned pid, time_t now) {
+    int who = session_slot(session, pid);
+    if (who < 0) return;
+    session->connected[who] = 1;
+    session->last_seen[who] = now;
+    if (session->paused && session->connected[0] && session->connected[1]) {
+        session->paused = 0;
+        session->paused_at = 0;
+    }
+}
+
+static Session *active_session_for_player(unsigned pid) {
+    int i;
+    for (i = 0; i < MAX_SESSIONS; ++i) {
+        if (sessions[i].used && !sessions[i].over && session_slot(&sessions[i], pid) >= 0) {
+            return &sessions[i];
+        }
+    }
+    return NULL;
+}
+
+static void maintenance_locked(time_t now) {
+    int i;
+    for (i = 0; i < MAX_SESSIONS; ++i) {
+        Session *session = &sessions[i];
+        int disconnected = -1;
+        int who;
+        if (!session->used || !session->started || session->over) continue;
+
+        if (!session->paused) {
+            for (who = 0; who < 2; ++who) {
+                if (session->connected[who] &&
+                    now - session->last_seen[who] >= SERVER_HEARTBEAT_STALE_SECONDS) {
+                    session->connected[who] = 0;
+                    if (disconnected < 0 || session->last_seen[who] < session->last_seen[disconnected]) {
+                        disconnected = who;
+                    }
+                }
+            }
+        }
+
+        if (!session->connected[0] || !session->connected[1]) {
+            if (!session->paused) {
+                session->paused = 1;
+                session->paused_at = disconnected >= 0 ? session->last_seen[disconnected] : now;
+            }
+            if (now - session->paused_at >= SERVER_DISCONNECT_TIMEOUT_SECONDS &&
+                session->connected[0] != session->connected[1]) {
+                session->over = 1;
+                session->paused = 0;
+                session->winner = session->connected[0] ? session->host : session->guest;
+            }
+        } else {
+            session->paused = 0;
+            session->paused_at = 0;
+        }
+    }
+}
+
 static int has_active_session(unsigned pid) {
     int i;
     for (i = 0; i < MAX_SESSIONS; ++i) {
@@ -104,6 +168,16 @@ int server_state_init(void) {
     next_session = 1;
     state_mutex_init(&state_lock);
     return 0;
+}
+
+void server_state_maintenance_at(time_t now) {
+    state_mutex_lock(&state_lock);
+    maintenance_locked(now);
+    state_mutex_unlock(&state_lock);
+}
+
+void server_state_maintenance(void) {
+    server_state_maintenance_at(time(NULL));
 }
 
 static void set_error(char *out, size_t size, const char *message) {
@@ -181,6 +255,8 @@ static void command_create(const char *pid_text, char *out, size_t size) {
     memset(session, 0, sizeof(*session));
     session->used = 1;
     session->host = pid;
+    session->connected[0] = 1;
+    session->last_seen[0] = time(NULL);
     snprintf(session->host_name, sizeof(session->host_name), "%s", player->name);
     for (attempts = 0; attempts < 99999; ++attempts) {
         int collision = 0;
@@ -213,6 +289,8 @@ static void command_join(const char *pid_text, const char *sid, char *out, size_
     }
     session->guest = pid;
     session->pending = 1;
+    session->connected[1] = 1;
+    session->last_seen[1] = time(NULL);
     snprintf(session->guest_name, sizeof(session->guest_name), "%s", player->name);
     snprintf(out, size, "OK|request sent");
 }
@@ -235,10 +313,38 @@ static void command_decide(const char *pid_text, const char *sid, const char *de
     }
 }
 
+static void command_heartbeat(const char *pid_text, const char *sid, char *out, size_t size) {
+    Session *session = sid ? session_find(sid) : NULL;
+    unsigned pid = parse_player_id(pid_text);
+    int who = session ? session_slot(session, pid) : -1;
+    int was_paused;
+    if (!session || who < 0 || session->over) {
+        set_error(out, size, "session unavailable");
+        return;
+    }
+    was_paused = session->paused;
+    touch_player(session, pid, time(NULL));
+    if (was_paused && !session->paused) snprintf(out, size, "OK|RECONNECTED");
+    else snprintf(out, size, "OK|HEARTBEAT");
+}
+
+static void command_resume(const char *pid_text, char *out, size_t size) {
+    unsigned pid = parse_player_id(pid_text);
+    Session *session = active_session_for_player(pid);
+    if (!session) {
+        set_error(out, size, "no active session");
+        return;
+    }
+    touch_player(session, pid, time(NULL));
+    snprintf(out, size, "OK|%s", session->id);
+}
+
 static void command_status(const char *pid_text, const char *sid, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
-    int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
+    unsigned pid = parse_player_id(pid_text);
+    int who = session ? session_slot(session, pid) : -1;
     if (who < 0) { set_error(out, size, session ? "not a member" : "no session"); return; }
+    touch_player(session, pid, time(NULL));
     snprintf(out, size, "OK|%s|%s|%d|%d|%d|%d", session->host_name, session->guest_name,
              session->pending, session->accepted, session->started, session->over);
 }
@@ -253,6 +359,7 @@ static void command_place(const char *pid_text, const char *sid, const char *row
         session->ship_count[who] >= SHIP_COUNT) {
         set_error(out, size, "placement unavailable"); return;
     }
+    touch_player(session, parse_player_id(pid_text), time(NULL));
     if (!parse_integer(row_text, &row) || !parse_integer(col_text, &col) ||
         !parse_integer(length_text, &length) || !orientation_text || orientation_text[1] != '\0') {
         set_error(out, size, "invalid ship placement");
@@ -273,6 +380,7 @@ static void command_ready(const char *pid_text, const char *sid, char *out, size
     if (!session || who < 0 || !session->accepted || session->ship_count[who] != SHIP_COUNT) {
         set_error(out, size, "place all five ships first"); return;
     }
+    touch_player(session, parse_player_id(pid_text), time(NULL));
     session->ready[who] = 1;
     if (session->ready[0] && session->ready[1]) session->started = 1;
     snprintf(out, size, "OK|%s", session->started ? "game started" : "waiting for opponent");
@@ -283,9 +391,10 @@ static void command_shot(const char *pid_text, const char *sid, const char *row_
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
     GameResult result;
-    if (!session || !session->started || session->over || who != session->turn) {
-        set_error(out, size, "not your turn or game inactive"); return;
+    if (!session || !session->started || session->over || session->paused || who != session->turn) {
+        set_error(out, size, session && session->paused ? "game paused; waiting for reconnection" : "not your turn or game inactive"); return;
     }
+    touch_player(session, parse_player_id(pid_text), time(NULL));
     {
         int row, col;
         if (!parse_integer(row_text, &row) || !parse_integer(col_text, &col)) {
@@ -308,10 +417,11 @@ static void command_shot(const char *pid_text, const char *sid, const char *row_
 static void command_surrender(const char *pid_text, const char *sid, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
-    if (!session || who < 0 || !session->started || session->over) {
-        set_error(out, size, "surrender unavailable");
+    if (!session || who < 0 || !session->started || session->over || session->paused) {
+        set_error(out, size, session && session->paused ? "game paused; waiting for reconnection" : "surrender unavailable");
         return;
     }
+    touch_player(session, parse_player_id(pid_text), time(NULL));
     session->winner = who == 0 ? session->guest : session->host;
     session->over = 1;
     snprintf(out, size, "OK|SURRENDER|WIN");
@@ -324,6 +434,8 @@ static void reset_game(Session *session) {
     memset(session->ready, 0, sizeof(session->ready));
     session->started = 0;
     session->over = 0;
+    session->paused = 0;
+    session->paused_at = 0;
     session->turn = 0;
     session->winner = 0;
 }
@@ -344,6 +456,8 @@ static void command_rematch(const char *pid_text, const char *sid, const char *c
         session->guest_name[0] = '\0';
         session->pending = 0;
         session->accepted = 0;
+        session->connected[1] = 0;
+        session->last_seen[1] = 0;
         snprintf(out, size, "OK|session open for new player");
     } else {
         set_error(out, size, "host decision unavailable; use same or new after game");
@@ -361,6 +475,10 @@ static void command_leave(const char *pid_text, const char *sid, char *out, size
     if (who == 0 && session->guest) {
         session->host = session->guest;
         snprintf(session->host_name, sizeof(session->host_name), "%s", session->guest_name);
+        session->connected[0] = session->connected[1];
+        session->last_seen[0] = session->last_seen[1];
+        session->connected[1] = 0;
+        session->last_seen[1] = 0;
         session->guest = 0;
         session->guest_name[0] = '\0';
         session->accepted = 0;
@@ -387,6 +505,7 @@ static void command_quit(const char *pid_text, char *out, size_t size) {
 
 static const char *session_phase(const Session *session, int who) {
     if (session->over) return "FINISHED";
+    if (session->paused) return "PAUSED";
     if (session->started) return "PLAYING";
     if (!session->guest) return "WAITING_REQUEST";
     if (session->pending) return who == 1 ? "WAITING_ACCEPT" : "REQUEST_PENDING";
@@ -423,16 +542,20 @@ static void encode_grid(const GameBoard *board, int target, char grid[GAME_SIZE 
 
 static void command_view(const char *pid_text, const char *sid, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
-    int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
+    unsigned pid = parse_player_id(pid_text);
+    int who = session ? session_slot(session, pid) : -1;
     char own[GAME_SIZE * GAME_SIZE + 1];
     char target[GAME_SIZE * GAME_SIZE + 1];
     const char *turn_name = "-";
+    const char *winner_name = "-";
     if (!session || who < 0) { set_error(out, size, session ? "not a member" : "no session"); return; }
+    touch_player(session, pid, time(NULL));
     encode_grid(&session->board[who], 0, own);
     encode_grid(&session->board[1 - who], 1, target);
-    if (session->started && !session->over) turn_name = session->turn == 0 ? session->host_name : session->guest_name;
-    snprintf(out, size, "OK|%s|%s|%s|%s|%s", session_phase(session, who), who == 0 ? "HOST" : "GUEST",
-             turn_name, own, target);
+    if (session->started && !session->over && !session->paused) turn_name = session->turn == 0 ? session->host_name : session->guest_name;
+    if (session->over) winner_name = session->winner == session->host ? session->host_name : session->guest_name;
+    snprintf(out, size, "OK|%s|%s|%s|%s|%s|%s", session_phase(session, who), who == 0 ? "HOST" : "GUEST",
+             turn_name, own, target, winner_name);
 }
 
 void server_state_process(const char *request, char *response, size_t response_size) {
@@ -451,12 +574,15 @@ void server_state_process(const char *request, char *response, size_t response_s
     }
     set_error(response, size, "bad request");
     state_mutex_lock(&state_lock);
+    maintenance_locked(time(NULL));
     if (!fields[0]) { /* leave default error */ }
     else if (strcmp(fields[0], "HELLO") == 0 && count == 2) command_hello(fields[1], response, size);
     else if (strcmp(fields[0], "LIST") == 0 && count == 1) command_list(response, size);
     else if (strcmp(fields[0], "CREATE") == 0 && count == 2) command_create(fields[1], response, size);
     else if (strcmp(fields[0], "JOIN") == 0 && count == 3) command_join(fields[1], fields[2], response, size);
     else if (strcmp(fields[0], "DECIDE") == 0 && count == 4) command_decide(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "RESUME") == 0 && count == 2) command_resume(fields[1], response, size);
+    else if (strcmp(fields[0], "HEARTBEAT") == 0 && count == 3) command_heartbeat(fields[1], fields[2], response, size);
     else if (strcmp(fields[0], "STATUS") == 0 && count == 3) command_status(fields[1], fields[2], response, size);
     else if (strcmp(fields[0], "PLACE") == 0 && count == 7) command_place(fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], response, size);
     else if (strcmp(fields[0], "READY") == 0 && count == 3) command_ready(fields[1], fields[2], response, size);

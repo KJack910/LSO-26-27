@@ -166,7 +166,7 @@ def main():
         assert request(port, f"LEAVE|{alice[1]}|{session_id}").startswith("ERR|")
         assert request(port, f"QUIT|{alice[1]}").startswith("ERR|")
         view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert len(view) == 6 and view[:4] == ["OK", "PLACEMENT", "HOST", "-"]
+        assert len(view) == 7 and view[:4] == ["OK", "PLACEMENT", "HOST", "-"]
         assert len(view[4]) == len(view[5]) == 100
         assert set(view[4]) == set(view[5]) == {"."}
 
@@ -182,7 +182,7 @@ def main():
         assert ready == "OK|game started", ready
         view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
         assert view[:4] == ["OK", "PLAYING", "HOST", "Alice"]
-        assert set(view[4]) == {"S", "."}
+        assert set(view[4]) == {"P", "C", "S", "I", "K", "."}
         assert set(view[5]) == {"."}
 
         assert request(port, f"SHOT|{alice[1]}|{session_id}|garbage|0").startswith("ERR|")
@@ -196,7 +196,8 @@ def main():
         play_to_win(port, alice[1], bob[1], session_id, fleet)
         view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
         assert view[:4] == ["OK", "FINISHED", "HOST", "-"]
-        assert view[5][50] == "X"
+        assert view[5][50] == "p"
+        assert view[6] == "Alice"
         assert request(port, f"QUIT|{alice[1]}") == "OK|quit allowed"
         assert request(port, f"QUIT|{bob[1]}") == "OK|quit allowed"
 
@@ -210,7 +211,8 @@ def main():
                 ) == "OK|placed"
             request(port, f"READY|{player_id}|{session_id}")
         assert request(port, f"SURRENDER|{alice[1]}|{session_id}") == "OK|SURRENDER|WIN"
-        assert request(port, f"VIEW|{bob[1]}|{session_id}").split("|")[1] == "FINISHED"
+        surrender_view = request(port, f"VIEW|{bob[1]}|{session_id}").split("|")
+        assert surrender_view[1] == "FINISHED" and surrender_view[6] == "Bob"
 
         assert request(port, f"REMATCH|{alice[1]}|{session_id}|same") == "OK|rematch started"
         for player_id, row in ((alice[1], 0), (bob[1], 5)):
@@ -223,7 +225,8 @@ def main():
         play_to_win(port, alice[1], bob[1], session_id, fleet)
         view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
         assert view[:4] == ["OK", "FINISHED", "HOST", "-"]
-        assert view[5][50] == "X"
+        assert view[5][50] == "p"
+        assert view[6] == "Alice"
         assert request(port, f"REMATCH|{alice[1]}|{session_id}|new") == "OK|session open for new player"
         assert session_id in request(port, "LIST")
         assert request(port, f"REMATCH|{bob[1]}|{session_id}|same").startswith("ERR|")
