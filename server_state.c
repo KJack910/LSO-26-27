@@ -471,7 +471,7 @@ static void command_leave(const char *pid_text, const char *sid, char *out, size
     unsigned pid = parse_player_id(pid_text);
     int who = session ? session_slot(session, pid) : -1;
     if (!session || who < 0) { set_error(out, size, "not a member"); return; }
-    if (!session->over) { set_error(out, size, "cannot leave an active session"); return; }
+    if (session->started && !session->over) { set_error(out, size, "cannot leave an active game; surrender instead"); return; }
     if (who == 0 && session->guest) {
         session->host = session->guest;
         snprintf(session->host_name, sizeof(session->host_name), "%s", session->guest_name);

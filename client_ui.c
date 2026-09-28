@@ -221,7 +221,12 @@ static int place_fleet(const char *host, const char *port, const char *pid, cons
         char orientation;
         printf("\n--- Nave %d/5: %s ---\n", *placed + 1, SHIP_NAMES[*placed]);
         puts("Inserisci riga, colonna e orientamento (H=orizzontale, V=verticale).");
-        if (!read_input("Es. \"2 3 H\": ", input, sizeof(input))) return 0;
+        if (!read_input("Es. \"2 3 H\" (oppure E per uscire): ", input, sizeof(input))) return 0;
+        if (input[0] == 'e' || input[0] == 'E') {
+            snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+            send_simple(host, port, command);
+            return 0;
+        }
         char extra;
         if (sscanf(input, "%d %d %c %c", &row, &col, &orientation, &extra) != 3) {
             puts("Errore: devi inserire SOLO riga, colonna e orientamento (es. 2 3 H).");
@@ -278,7 +283,12 @@ static void session_screen(const char *host, const char *port, const char *pid,
 
         if (strcmp(phase, "REQUEST_PENDING") == 0 && is_host) {
             printf("\n%s chiede di unirsi alla sessione.\n", guest_name);
-            if (!read_input("Accettare? (s/n): ", input, sizeof(input))) goto session_done;
+            if (!read_input("Accettare? (s/n, oppure E per uscire): ", input, sizeof(input))) goto session_done;
+            if (input[0] == 'e' || input[0] == 'E') {
+                snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                if (send_simple(host, port, command)) goto session_done;
+                continue;
+            }
             snprintf(command, sizeof(command), "DECIDE|%s|%s|%d", pid, sid,
                      input[0] == 's' || input[0] == 'S');
             send_simple(host, port, command);
@@ -286,18 +296,30 @@ static void session_screen(const char *host, const char *port, const char *pid,
         }
         if (strcmp(phase, "WAITING_REQUEST") == 0) {
             puts("Lobby della sessione: condividi l'ID con l'altro giocatore.");
-            if (!read_input("Premi INVIO per aggiornare la lobby: ", input, sizeof(input))) goto session_done;
+            if (!read_input("Premi INVIO per aggiornare la lobby (oppure E per uscire): ", input, sizeof(input))) goto session_done;
+            if (input[0] == 'e' || input[0] == 'E') {
+                snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                if (send_simple(host, port, command)) goto session_done;
+            }
             continue;
         }
         if (strcmp(phase, "WAITING_ACCEPT") == 0) {
             puts("Richiesta inviata. Attendi l'accettazione dell'host.");
-            if (!read_input("Premi INVIO per verificare: ", input, sizeof(input))) goto session_done;
+            if (!read_input("Premi INVIO per verificare (oppure E per uscire): ", input, sizeof(input))) goto session_done;
+            if (input[0] == 'e' || input[0] == 'E') {
+                snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                if (send_simple(host, port, command)) goto session_done;
+            }
             continue;
         }
         if (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0) {
             if (placed < FLEET_COUNT && !place_fleet(host, port, pid, sid, &placed)) continue;
             puts("Flotta pronta: in attesa dell'avversario.");
-            if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) goto session_done;
+            if (!read_input("Premi INVIO per aggiornare (oppure E per uscire): ", input, sizeof(input))) goto session_done;
+            if (input[0] == 'e' || input[0] == 'E') {
+                snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                if (send_simple(host, port, command)) goto session_done;
+            }
             continue;
         }
         if (strcmp(phase, "PAUSED") == 0) {
@@ -355,7 +377,11 @@ static void session_screen(const char *host, const char *port, const char *pid,
                 }
             } else {
                 puts("Partita terminata. Attendi la decisione dell'host.");
-                if (!read_input("Premi INVIO per aggiornare: ", input, sizeof(input))) goto session_done;
+                if (!read_input("Premi INVIO per aggiornare (oppure E per uscire): ", input, sizeof(input))) goto session_done;
+                if (input[0] == 'e' || input[0] == 'E') {
+                    snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                    if (send_simple(host, port, command)) goto session_done;
+                }
                 if (over && !accepted) goto session_done;
             }
         }
