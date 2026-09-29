@@ -29,8 +29,11 @@ if(BUILD_TESTING)
 endif()
 
 if(WIN32)
-    target_link_libraries(server PRIVATE ws2_32)
+    target_link_libraries(server PRIVATE ws2_32 bcrypt)
     target_link_libraries(client PRIVATE ws2_32)
+    if(TARGET test_server_state)
+        target_link_libraries(test_server_state PRIVATE bcrypt)
+    endif()
 endif()
 
 if(MSVC)

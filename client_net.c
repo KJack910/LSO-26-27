@@ -91,6 +91,7 @@ struct ClientPresence {
     char port[PRESENCE_TEXT_CAPACITY];
     char pid[PRESENCE_TEXT_CAPACITY];
     char sid[PRESENCE_TEXT_CAPACITY];
+    char token[PRESENCE_TEXT_CAPACITY];
     volatile int running;
 #ifdef _WIN32
     HANDLE thread;
@@ -106,7 +107,7 @@ static presence_thread_return_t presence_worker(void *raw) {
     int waited;
 
     while (presence->running) {
-        snprintf(request, sizeof(request), "HEARTBEAT|%s|%s", presence->pid, presence->sid);
+        snprintf(request, sizeof(request), "HEARTBEAT|%s|%s|%s", presence->pid, presence->sid, presence->token);
         (void)client_request(presence->host, presence->port, request,
                              response, sizeof(response));
         for (waited = 0; waited < SERVER_HEARTBEAT_INTERVAL_SECONDS && presence->running; ++waited) {
@@ -125,16 +126,17 @@ static presence_thread_return_t presence_worker(void *raw) {
 }
 
 int client_presence_start(const char *host, const char *port,
-                          const char *pid, const char *sid,
+                          const char *pid, const char *sid, const char *token,
                           ClientPresence **out_presence) {
     ClientPresence *presence;
-    if (!host || !port || !pid || !sid || !out_presence) return -1;
+    if (!host || !port || !pid || !sid || !token || !out_presence) return -1;
     presence = (ClientPresence *)calloc(1, sizeof(*presence));
     if (!presence) return -1;
     snprintf(presence->host, sizeof(presence->host), "%s", host);
     snprintf(presence->port, sizeof(presence->port), "%s", port);
     snprintf(presence->pid, sizeof(presence->pid), "%s", pid);
     snprintf(presence->sid, sizeof(presence->sid), "%s", sid);
+    snprintf(presence->token, sizeof(presence->token), "%s", token);
     presence->running = 1;
 #ifdef _WIN32
     presence->thread = CreateThread(NULL, 0, presence_worker, presence, 0, NULL);

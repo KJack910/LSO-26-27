@@ -1,27 +1,31 @@
 # Battleship multiplayer in C
 
-Client/server TCP in C11 con lobby da terminale. Compilazione e test:
+Client/server TCP in C11 con lobby da terminale.
 
-**Linux / macOS:**
+Compilazione e test:
+
+Linux / macOS:
 ```sh
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-**Windows (PowerShell / Prompt dei comandi):**
+Windows:
 ```powershell
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Avviare il server (`./build/server` su Linux/macOS, `.\build\server.exe` su Windows. Indirizzo e porta opzionali predefiniti `0.0.0.0:5000`) e poi uno o più client (`./build/client` su Linux/macOS, `.\build\client.exe` su Windows). Il nome e l'ID numerico del giocatore vivono solo fino alla chiusura del server. Il protocollo TCP usa righe terminate da newline; comandi e risposte sono descritti in `FUNZIONAMENTO.md`.
+Avviare il server (`./build/server` oppure `.\build\server.exe`) e poi uno o più client (`./build/client` oppure `.\build\client.exe`). Indirizzo e porta sono opzionali e usano `0.0.0.0:5000` per il server e `127.0.0.1:5000` per il client. Il protocollo è documentato in `FUNZIONAMENTO.md`.
 
-Il server gestisce richieste concorrenti con thread (massimo 64 worker; timeout di rete 20 secondi), mantiene un heartbeat client ogni 5 secondi durante la sessione e applica una finestra di riconnessione di 60 secondi. Non viene creato alcun registro persistente dei giocatori: nomi, ID e sessioni sono volatili e si azzerano all'arresto del server. Il nome non è autenticato: si tratta di un prototipo didattico, non di un servizio sicuro per Internet.
+Ogni giocatore riceve un PID e un token segreto. Il nome visualizzato non è univoco e non può essere usato per impersonare un'altra identità. Il client conserva il token in un file locale per poter tentare la riconnessione dopo un riavvio; il server conserva identità e sessioni soltanto in memoria.
 
-Ogni giocatore può avere una sola sessione attiva: dopo la creazione l'host entra direttamente nella lobby della sessione; l'ospite richiede l'accesso dalla lobby principale e l'host decide lì se accettarlo. Le sessioni hanno ID del formato `S00001` (lettera S e cinque cifre). Dopo l'accettazione, il posizionamento guidato delle navi e la conferma di prontezza avvengono prima della partita. Le due griglie sono affiancate e si aggiornano a ogni azione. `Q` è resa e sconfitta; dopo la partita `D` permette all'host la rivincita o un nuovo avversario, mentre `E` esce dalla sessione. Il server valida posizionamenti, turni, colpi ripetuti e vittoria.
+Il server gestisce richieste concorrenti con un massimo di 64 worker TCP e un timeout di rete di 20 secondi. Durante una sessione il client invia un heartbeat ogni 5 secondi. Dopo due heartbeat mancanti la partita entra in pausa; il giocatore può rientrare entro 60 secondi. Se solo l'avversario resta connesso, allo scadere del termine la vittoria viene assegnata a lui. Se entrambi spariscono, la sessione viene rimossa dopo il timeout.
 
-Il codice è organizzato in moduli: `server.c` per listener/thread e manutenzione delle sessioni, `server_state.c` per comandi, heartbeat, pausa e assegnazione della vittoria, `client_net.c` per richieste TCP e heartbeat, `client_ui.c` per menu e griglie e `game.c` per le regole della plancia.
+Le lobby abbandonate e le sessioni terminate vengono ripulite dal thread di manutenzione. Se l'host perde la connessione durante il posizionamento, l'ospite connesso diventa host, la flotta viene azzerata e il client richiede nuovamente il posizionamento quando arriva un nuovo avversario.
 
-Durante una partita, se il client di un giocatore smette di inviare heartbeat, il server porta la sessione in pausa dopo due heartbeat mancanti (circa 10 secondi). La riconnessione tramite `RESUME`/`HEARTBEAT` riprende la partita; se non arriva entro 60 secondi dall'ultimo heartbeat, la vittoria viene assegnata al giocatore rimasto connesso. La resa invia `SURRENDER`, assegna immediatamente la vittoria all'avversario e mantiene la sessione disponibile per il risultato e la rivincita.
+`Q` è resa e assegna la vittoria all'avversario. Dopo la partita `D` consente all'host di scegliere rivincita o nuovo avversario; sono accettati soltanto i comandi validi. Le griglie bersaglio mostrano soltanto `X` per un colpo a segno, senza rivelare il tipo di nave colpita.
+
+Il codice è organizzato in moduli: `server.c` per listener/thread e manutenzione, `server_state.c` per autenticazione, comandi e sessioni, `client_net.c` per richieste TCP e heartbeat, `client_ui.c` per menu e griglie e `game.c` per le regole della plancia.

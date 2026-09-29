@@ -14,7 +14,7 @@ int client_request(
 );
 
 int client_presence_start(const char *host, const char *port,
-                          const char *pid, const char *sid,
+                          const char *pid, const char *sid, const char *token,
                           ClientPresence **presence);
 void client_presence_stop(ClientPresence *presence);
 

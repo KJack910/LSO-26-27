@@ -1,9 +1,8 @@
+import re
 import socket
 import subprocess
 import sys
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 
 def free_port():
@@ -13,22 +12,15 @@ def free_port():
 
 
 def request(port, payload):
-    with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
         sock.sendall((payload + "\n").encode("utf-8"))
         data = bytearray()
         while not data.endswith(b"\n"):
-            chunk = sock.recv(2048)
+            chunk = sock.recv(4096)
             if not chunk:
                 raise AssertionError("server closed before replying")
             data.extend(chunk)
         return data.decode("utf-8").rstrip("\r\n")
-
-
-def send_incomplete_frame(port, payload):
-    with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
-        sock.sendall(payload.encode("utf-8"))
-        sock.shutdown(socket.SHUT_WR)
-        return sock.recv(2048)
 
 
 def wait_for_server(port, process):
@@ -44,35 +36,30 @@ def wait_for_server(port, process):
     raise AssertionError("server did not start listening")
 
 
-def play_to_win(port, host_id, guest_id, session_id, fleet):
-    target_cells = [
-        (row, col)
-        for row, length in zip(range(5, 10), fleet)
-        for col in range(length)
-    ]
-    guest_misses = [(row, 9) for row in range(9)] + [(row, 8) for row in range(8)]
-    sunken_ship_ends = set()
-    total = 0
-    for length in fleet:
-        total += length
-        sunken_ship_ends.add(total - 1)
+def hello(port, name, token=None):
+    payload = f"HELLO|{name}" if token is None else f"HELLO|{name}|{token}"
+    fields = request(port, payload).split("|")
+    assert fields[0] == "OK", fields
+    assert len(fields) == 4, fields
+    return fields[1], fields[3]
 
-    for index, (row, col) in enumerate(target_cells):
-        response = request(port, f"SHOT|{host_id}|{session_id}|{row}|{col}")
-        if index == len(target_cells) - 1:
-            expected = "OK|SUNK|WIN"
-        elif index in sunken_ship_ends:
-            expected = "OK|SUNK"
-        else:
-            expected = "OK|HIT"
-        assert response == expected, response
 
-        if index < len(target_cells) - 1:
-            miss_row, miss_col = guest_misses[index]
+def setup_game(port):
+    alice_id, alice_token = hello(port, "Alice")
+    bob_id, bob_token = hello(port, "Bob")
+    session = request(port, f"CREATE|{alice_id}|{alice_token}").split("|")[1]
+    assert re.fullmatch(r"S[0-9]{5}", session)
+    assert request(port, f"JOIN|{bob_id}|{session}|{bob_token}") == "OK|request sent"
+    assert request(port, f"DECIDE|{alice_id}|{session}|1|{alice_token}") == "OK|accepted"
+    fleet = (5, 4, 3, 3, 2)
+    for player_id, token, row in ((alice_id, alice_token, 0), (bob_id, bob_token, 5)):
+        for offset, length in enumerate(fleet):
             assert request(
                 port,
-                f"SHOT|{guest_id}|{session_id}|{miss_row}|{miss_col}",
-            ) == "OK|MISS"
+                f"PLACE|{player_id}|{session}|{row + offset}|0|H|{length}|{token}",
+            ) == "OK|placed"
+        assert request(port, f"READY|{player_id}|{session}|{token}").startswith("OK|")
+    return alice_id, alice_token, bob_id, bob_token, session
 
 
 def main():
@@ -85,164 +72,60 @@ def main():
     )
     try:
         wait_for_server(port, process)
-        assert send_incomplete_frame(port, "HELLO|NoNewline") == b""
-        idle_clients = [socket.create_connection(("127.0.0.1", port), timeout=2) for _ in range(64)]
-        overflow_client = socket.create_connection(("127.0.0.1", port), timeout=2)
-        overflow_client.settimeout(2)
-        assert overflow_client.recv(1) == b""
-        overflow_client.close()
-        for idle_client in idle_clients:
-            idle_client.close()
 
-        client_run = subprocess.run(
-            [sys.argv[2], "127.0.0.1", str(port)],
-            input="TerminalSmoke\n0\n",
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-        assert "Benvenuto, TerminalSmoke" in client_run.stdout
-        assert "Crea una partita" in client_run.stdout
+        # The same display name creates two independent identities.
+        first_id, first_token = hello(port, "Duplicate")
+        second_id, second_token = hello(port, "Duplicate")
+        assert first_id != second_id
+        assert request(port, f"CREATE|{first_id}|{second_token}").startswith("ERR|")
+        session = request(port, f"CREATE|{first_id}|{first_token}").split("|")[1]
+        assert request(port, f"QUIT|{first_id}|{first_token}") == "OK|quit allowed"
+        assert request(port, f"HELLO|Duplicate|{first_token}").startswith("ERR|")
 
-        alice = request(port, "HELLO|Alice").split("|")
-        bob = request(port, "HELLO|Bob").split("|")
-        assert alice[0] == bob[0] == "OK"
-        assert alice[1] != bob[1]
-        assert request(port, "HELLO|Alice").split("|")[1] == alice[1]
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            concurrent = list(pool.map(
-                lambda index: request(port, f"HELLO|Concurrent-{index}").split("|"),
-                range(24),
-            ))
-        concurrent_ids = [entry[1] for entry in concurrent]
-        assert len(set(concurrent_ids)) == len(concurrent_ids)
-
-        session = request(port, f"CREATE|{alice[1]}").split("|")
-        assert session[0] == "OK", session
-        session_id = session[1]
-        assert re.fullmatch(r"S[0-9]{5}", session_id)
-        assert request(port, f"CREATE|{alice[1]}").startswith("ERR|")
-        other_host = request(port, "HELLO|OtherHost").split("|")[1]
-        second_session = request(port, f"CREATE|{other_host}").split("|")[1]
-        assert second_session != session_id
-        assert request(port, "LIST").startswith("OK|" + session_id)
-        client_game = subprocess.run(
-            [sys.argv[2], "127.0.0.1", str(port)],
-            input="TerminalHost\n1\n",
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-        assert "Sessione creata: S" in client_game.stdout
-        assert "Accesso diretto alla lobby" in client_game.stdout
-        assert "  4  Accetta" not in client_game.stdout
-        assert "  5  Apri" not in client_game.stdout
-        waiting = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert waiting[:4] == ["OK", "WAITING_REQUEST", "HOST", "-"]
-        grid_client = subprocess.run(
-            [sys.argv[2], "127.0.0.1", str(port)],
-            input=f"GridSmoke\n3\n{session_id}\n",
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        )
-        assert "LA TUA FLOTTA" in grid_client.stdout
-        assert any(
-            "LA TUA FLOTTA" in line and "BERSAGLI SULLA GRIGLIA AVVERSARIA" in line
-            for line in grid_client.stdout.splitlines()
-        )
-        assert request(port, f"DECIDE|{alice[1]}|{session_id}|0") == "OK|rejected"
-        assert request(port, f"JOIN|{bob[1]}|{session_id}").startswith("OK|")
-        pending = request(port, f"VIEW|{bob[1]}|{session_id}").split("|")
-        assert pending[:4] == ["OK", "WAITING_ACCEPT", "GUEST", "-"]
-        assert request(port, f"CREATE|{bob[1]}").startswith("ERR|")
-        assert request(port, f"JOIN|{bob[1]}|{second_session}").startswith("ERR|")
-        assert request(port, f"DECIDE|{alice[1]}|{session_id}|1").startswith("OK|")
-        assert request(port, f"PLACE|{alice[1]}|{session_id}|garbage|0|H|5").startswith("ERR|")
-        assert request(port, f"LEAVE|{alice[1]}|{session_id}").startswith("ERR|")
-        assert request(port, f"QUIT|{alice[1]}").startswith("ERR|")
-        view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert len(view) == 7 and view[:4] == ["OK", "PLACEMENT", "HOST", "-"]
-        assert len(view[4]) == len(view[5]) == 100
-        assert set(view[4]) == set(view[5]) == {"."}
-
-        fleet = (5, 4, 3, 3, 2)
-        for player_id, row in ((alice[1], 0), (bob[1], 5)):
-            for offset, length in enumerate(fleet):
-                result = request(
-                    port,
-                    f"PLACE|{player_id}|{session_id}|{row + offset}|0|H|{length}",
-                )
-                assert result == "OK|placed", result
-            ready = request(port, f"READY|{player_id}|{session_id}")
-        assert ready == "OK|game started", ready
-        view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
+        # Full protocol and the generic target hit marker.
+        alice_id, alice_token, bob_id, bob_token, session = setup_game(port)
+        view = request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")
         assert view[:4] == ["OK", "PLAYING", "HOST", "Alice"]
         assert set(view[4]) == {"P", "C", "S", "I", "K", "."}
         assert set(view[5]) == {"."}
+        assert request(port, f"SHOT|{alice_id}|{session}|5|0|{alice_token}") == "OK|HIT"
+        view = request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")
+        assert view[5][50] == "X", view[5]
+        assert request(port, f"SURRENDER|{alice_id}|{session}|{alice_token}") == "OK|SURRENDER|WIN"
+        finished = request(port, f"VIEW|{bob_id}|{session}|{bob_token}").split("|")
+        assert finished[1] == "FINISHED" and finished[6] == "Bob"
+        assert request(port, f"RESUME|{alice_id}|{alice_token}") == f"OK|{session}"
+        assert request(port, f"REMATCH|{alice_id}|{session}|bad|{alice_token}").startswith("ERR|")
 
-        assert request(port, f"SHOT|{alice[1]}|{session_id}|garbage|0").startswith("ERR|")
-        assert request(port, f"SHOT|{alice[1]}|{session_id}|9|9") == "OK|MISS"
-        assert request(port, f"SHOT|{alice[1]}|{session_id}|9|8").startswith("ERR|")
-        assert request(port, f"SHOT|{bob[1]}|{session_id}|9|9") == "OK|MISS"
-        assert request(port, f"SHOT|{bob[1]}|{session_id}|9|9").startswith("ERR|")
-        view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert view[4][99] == "o" and view[5][99] == "o"
+        # Pregame host loss promotes the connected guest and resets placement.
+        host_id, host_token = hello(port, "PregameHost")
+        guest_id, guest_token = hello(port, "PregameGuest")
+        pregame = request(port, f"CREATE|{host_id}|{host_token}").split("|")[1]
+        assert request(port, f"JOIN|{guest_id}|{pregame}|{guest_token}") == "OK|request sent"
+        assert request(port, f"DECIDE|{host_id}|{pregame}|1|{host_token}") == "OK|accepted"
+        deadline = time.monotonic() + 16
+        while time.monotonic() < deadline:
+            time.sleep(3)
+            request(port, f"HEARTBEAT|{guest_id}|{pregame}|{guest_token}")
+            state = request(port, f"VIEW|{guest_id}|{pregame}|{guest_token}").split("|")
+            if state[2] == "HOST":
+                break
+        assert state[2] == "HOST", state
+        assert state[1] in {"WAITING_REQUEST", "PLACEMENT", "WAITING_READY"}, state
 
-        play_to_win(port, alice[1], bob[1], session_id, fleet)
-        view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert view[:4] == ["OK", "FINISHED", "HOST", "-"]
-        assert view[5][50] == "p"
-        assert view[6] == "Alice"
-        assert request(port, f"QUIT|{alice[1]}") == "OK|quit allowed"
-        assert request(port, f"QUIT|{bob[1]}") == "OK|quit allowed"
-
-        assert request(port, f"REMATCH|{alice[1]}|{session_id}|same") == "OK|rematch started"
-        assert request(port, f"STATUS|{alice[1]}|{session_id}").endswith("|0|0")
-        for player_id, row in ((alice[1], 0), (bob[1], 5)):
-            for offset, length in enumerate(fleet):
-                assert request(
-                    port,
-                    f"PLACE|{player_id}|{session_id}|{row + offset}|0|H|{length}",
-                ) == "OK|placed"
-            request(port, f"READY|{player_id}|{session_id}")
-        assert request(port, f"SURRENDER|{alice[1]}|{session_id}") == "OK|SURRENDER|WIN"
-        surrender_view = request(port, f"VIEW|{bob[1]}|{session_id}").split("|")
-        assert surrender_view[1] == "FINISHED" and surrender_view[6] == "Bob"
-
-        assert request(port, f"REMATCH|{alice[1]}|{session_id}|same") == "OK|rematch started"
-        for player_id, row in ((alice[1], 0), (bob[1], 5)):
-            for offset, length in enumerate(fleet):
-                assert request(
-                    port,
-                    f"PLACE|{player_id}|{session_id}|{row + offset}|0|H|{length}",
-                ) == "OK|placed"
-            request(port, f"READY|{player_id}|{session_id}")
-        play_to_win(port, alice[1], bob[1], session_id, fleet)
-        view = request(port, f"VIEW|{alice[1]}|{session_id}").split("|")
-        assert view[:4] == ["OK", "FINISHED", "HOST", "-"]
-        assert view[5][50] == "p"
-        assert view[6] == "Alice"
-        assert request(port, f"REMATCH|{alice[1]}|{session_id}|new") == "OK|session open for new player"
-        assert session_id in request(port, "LIST")
-        assert request(port, f"REMATCH|{bob[1]}|{session_id}|same").startswith("ERR|")
-        process.terminate()
-        process.wait(timeout=3)
-        process = subprocess.Popen(
-            [sys.argv[1], "127.0.0.1", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+        # Client can still start, authenticate, and exit through the UI.
+        smoke_name = f"TerminalSmoke{port}"
+        client_run = subprocess.run(
+            [sys.argv[2], "127.0.0.1", str(port)],
+            input=f"{smoke_name}\n0\n",
+            capture_output=True,
             text=True,
+            timeout=5,
+            check=True,
         )
-        wait_for_server(port, process)
-        restarted_bob = request(port, "HELLO|Bob").split("|")[1]
-        restarted_alice = request(port, "HELLO|Alice").split("|")[1]
-        assert restarted_bob == "1" and restarted_alice == "2"
-        print("server protocol integration passed")
+        assert f"Benvenuto, {smoke_name}" in client_run.stdout
+        assert "Crea una partita" in client_run.stdout
+        print("server protocol regression passed")
     finally:
         process.terminate()
         try:

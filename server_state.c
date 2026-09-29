@@ -12,10 +12,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <bcrypt.h>
 typedef CRITICAL_SECTION StateMutex;
 #define state_mutex_init(m) InitializeCriticalSection(m)
 #define state_mutex_lock(m) EnterCriticalSection(m)
@@ -41,6 +43,7 @@ typedef struct {
     int used;
     unsigned id;
     char name[NAME_LEN];
+    char token[SERVER_TOKEN_SIZE];
 } Player;
 
 typedef struct {
@@ -70,6 +73,51 @@ static Session sessions[MAX_SESSIONS];
 static StateMutex state_lock;
 static unsigned next_player = 1;
 static unsigned next_session = 1;
+static unsigned token_counter;
+
+static int fill_random_bytes(unsigned char *buffer, size_t size) {
+#ifdef _WIN32
+    return BCryptGenRandom(NULL, buffer, (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#else
+    FILE *random_source = fopen("/dev/urandom", "rb");
+    int ok = random_source != NULL && fread(buffer, 1, size, random_source) == size;
+    if (random_source) fclose(random_source);
+    return ok;
+#endif
+}
+
+static void generate_player_token(char token[SERVER_TOKEN_SIZE]) {
+    static const char hexadecimal[] = "0123456789abcdef";
+    unsigned char bytes[16];
+    if (!fill_random_bytes(bytes, sizeof(bytes))) {
+        uint64_t fallback = (uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)&token_counter;
+        for (size_t i = 0; i < sizeof(bytes); ++i) {
+            fallback = fallback * UINT64_C(2862933555777941757) + UINT64_C(3037000493) + ++token_counter;
+            bytes[i] = (unsigned char)(fallback >> 32);
+        }
+    }
+    for (size_t i = 0; i < sizeof(bytes); ++i) {
+        token[i * 2] = hexadecimal[bytes[i] >> 4];
+        token[i * 2 + 1] = hexadecimal[bytes[i] & 0x0f];
+    }
+    token[sizeof(bytes) * 2] = '\0';
+}
+
+static Player *player_find_token(const char *token) {
+    int i;
+    if (!token || !*token) return NULL;
+    for (i = 0; i < MAX_PLAYERS; ++i) {
+        if (players[i].used && strcmp(players[i].token, token) == 0) return &players[i];
+    }
+    return NULL;
+}
+
+static Player *player_find(unsigned id);
+
+static int player_auth(unsigned pid, const char *token) {
+    Player *player = player_find(pid);
+    return player != NULL && token != NULL && strcmp(player->token, token) == 0;
+}
 
 static Player *player_find(unsigned id) {
     int i;
@@ -93,6 +141,10 @@ static int session_slot(const Session *session, unsigned pid) {
     return -1;
 }
 
+static int session_member_auth(const Session *session, unsigned pid, const char *token) {
+    return session != NULL && session_slot(session, pid) >= 0 && player_auth(pid, token);
+}
+
 static void touch_player(Session *session, unsigned pid, time_t now) {
     int who = session_slot(session, pid);
     if (who < 0) return;
@@ -107,11 +159,31 @@ static void touch_player(Session *session, unsigned pid, time_t now) {
 static Session *active_session_for_player(unsigned pid) {
     int i;
     for (i = 0; i < MAX_SESSIONS; ++i) {
-        if (sessions[i].used && !sessions[i].over && session_slot(&sessions[i], pid) >= 0) {
+        if (sessions[i].used && session_slot(&sessions[i], pid) >= 0) {
             return &sessions[i];
         }
     }
     return NULL;
+}
+
+static void reset_game(Session *session);
+
+static void clear_guest(Session *session) {
+    session->guest = 0;
+    session->guest_name[0] = '\0';
+    session->connected[1] = 0;
+    session->last_seen[1] = 0;
+    session->pending = 0;
+    session->accepted = 0;
+}
+
+static void promote_guest_to_host(Session *session) {
+    session->host = session->guest;
+    snprintf(session->host_name, sizeof(session->host_name), "%s", session->guest_name);
+    session->connected[0] = session->connected[1];
+    session->last_seen[0] = session->last_seen[1];
+    clear_guest(session);
+    reset_game(session);
 }
 
 static void maintenance_locked(time_t now) {
@@ -120,9 +192,10 @@ static void maintenance_locked(time_t now) {
         Session *session = &sessions[i];
         int disconnected = -1;
         int who;
-        if (!session->used || !session->started || session->over) continue;
+        int skip_survivor_check = session->started && !session->over && session->paused;
+        if (!session->used) continue;
 
-        if (!session->paused) {
+        if (!skip_survivor_check) {
             for (who = 0; who < 2; ++who) {
                 if (session->connected[who] &&
                     now - session->last_seen[who] >= SERVER_HEARTBEAT_STALE_SECONDS) {
@@ -134,16 +207,37 @@ static void maintenance_locked(time_t now) {
             }
         }
 
+        if (session->over) {
+            if (!session->connected[0] && (!session->guest || !session->connected[1])) {
+                session->used = 0;
+            }
+            continue;
+        }
+
+        if (!session->started) {
+            if (!session->connected[0]) {
+                if (session->guest && session->connected[1]) promote_guest_to_host(session);
+                else session->used = 0;
+            } else if (session->guest && !session->connected[1]) {
+                clear_guest(session);
+                reset_game(session);
+            }
+            continue;
+        }
+
         if (!session->connected[0] || !session->connected[1]) {
             if (!session->paused) {
                 session->paused = 1;
                 session->paused_at = disconnected >= 0 ? session->last_seen[disconnected] : now;
             }
-            if (now - session->paused_at >= SERVER_DISCONNECT_TIMEOUT_SECONDS &&
-                session->connected[0] != session->connected[1]) {
-                session->over = 1;
-                session->paused = 0;
-                session->winner = session->connected[0] ? session->host : session->guest;
+            if (now - session->paused_at >= SERVER_DISCONNECT_TIMEOUT_SECONDS) {
+                if (session->connected[0] != session->connected[1]) {
+                    session->over = 1;
+                    session->paused = 0;
+                    session->winner = session->connected[0] ? session->host : session->guest;
+                } else {
+                    session->used = 0;
+                }
             }
         } else {
             session->paused = 0;
@@ -166,6 +260,8 @@ int server_state_init(void) {
     memset(sessions, 0, sizeof(sessions));
     next_player = 1;
     next_session = 1;
+    token_counter = 0;
+    srand((unsigned)time(NULL) ^ (unsigned)(uintptr_t)&state_lock);
     state_mutex_init(&state_lock);
     return 0;
 }
@@ -207,27 +303,29 @@ static int parse_integer(const char *text, int *value) {
     return 1;
 }
 
-static void command_hello(char *name, char *out, size_t size) {
+static void command_hello(char *name, const char *token, char *out, size_t size) {
     Player *player = NULL;
     int i;
     if (!name || !*name) { set_error(out, size, "bad request"); return; }
     for (i = 0; name[i]; ++i) {
         if (name[i] == '|' || name[i] == '\n' || name[i] == '\r') name[i] = ' ';
     }
-    for (i = 0; i < MAX_PLAYERS; ++i) {
-        if (players[i].used && strcmp(players[i].name, name) == 0) {
-            player = &players[i];
-            break;
+    if (token && *token) {
+        player = player_find_token(token);
+        if (!player || strcmp(player->name, name) != 0) {
+            set_error(out, size, "invalid identity token");
+            return;
         }
-    }
-    if (!player) {
+    } else {
         for (i = 0; i < MAX_PLAYERS; ++i) if (!players[i].used) { player = &players[i]; break; }
         if (!player) { set_error(out, size, "player capacity full"); return; }
+        memset(player, 0, sizeof(*player));
         player->used = 1;
         player->id = next_player++;
         snprintf(player->name, sizeof(player->name), "%s", name);
+        generate_player_token(player->token);
     }
-    snprintf(out, size, "OK|%u|%s", player->id, player->name);
+    snprintf(out, size, "OK|%u|%s|%s", player->id, player->name, player->token);
 }
 
 static void command_list(char *out, size_t size) {
@@ -243,13 +341,13 @@ static void command_list(char *out, size_t size) {
     }
 }
 
-static void command_create(const char *pid_text, char *out, size_t size) {
+static void command_create(const char *pid_text, const char *token, char *out, size_t size) {
     unsigned pid = parse_player_id(pid_text);
     Player *player = player_find(pid);
     Session *session = NULL;
     int i;
     unsigned attempts;
-    if (!player || has_active_session(pid)) { set_error(out, size, "invalid player or active session"); return; }
+    if (!player || !player_auth(pid, token) || has_active_session(pid)) { set_error(out, size, "invalid player or active session"); return; }
     for (i = 0; i < MAX_SESSIONS; ++i) if (!sessions[i].used || sessions[i].over) { session = &sessions[i]; break; }
     if (!session) { set_error(out, size, "session capacity full"); return; }
     memset(session, 0, sizeof(*session));
@@ -279,11 +377,11 @@ static void command_create(const char *pid_text, char *out, size_t size) {
     snprintf(out, size, "OK|%s", session->id);
 }
 
-static void command_join(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_join(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     unsigned pid = parse_player_id(pid_text);
     Player *player = player_find(pid);
     Session *session = sid ? session_find(sid) : NULL;
-    if (!player || !session || session->over || session->guest || session->host == pid || has_active_session(pid)) {
+    if (!player || !player_auth(pid, token) || !session || session->over || session->guest || session->host == pid || has_active_session(pid)) {
         set_error(out, size, "session unavailable or player already active");
         return;
     }
@@ -296,9 +394,10 @@ static void command_join(const char *pid_text, const char *sid, char *out, size_
 }
 
 static void command_decide(const char *pid_text, const char *sid, const char *decision,
-                           char *out, size_t size) {
+                           const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
-    if (!session || session->host != parse_player_id(pid_text) || !session->pending) {
+    unsigned pid = parse_player_id(pid_text);
+    if (!session || !player_auth(pid, token) || session->host != pid || !session->pending) {
         set_error(out, size, "no pending request");
         return;
     }
@@ -313,12 +412,11 @@ static void command_decide(const char *pid_text, const char *sid, const char *de
     }
 }
 
-static void command_heartbeat(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_heartbeat(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     unsigned pid = parse_player_id(pid_text);
-    int who = session ? session_slot(session, pid) : -1;
     int was_paused;
-    if (!session || who < 0 || session->over) {
+    if (!session || !session_member_auth(session, pid, token) || session->over) {
         set_error(out, size, "session unavailable");
         return;
     }
@@ -328,10 +426,10 @@ static void command_heartbeat(const char *pid_text, const char *sid, char *out, 
     else snprintf(out, size, "OK|HEARTBEAT");
 }
 
-static void command_resume(const char *pid_text, char *out, size_t size) {
+static void command_resume(const char *pid_text, const char *token, char *out, size_t size) {
     unsigned pid = parse_player_id(pid_text);
     Session *session = active_session_for_player(pid);
-    if (!session) {
+    if (!player_auth(pid, token) || !session) {
         set_error(out, size, "no active session");
         return;
     }
@@ -339,11 +437,10 @@ static void command_resume(const char *pid_text, char *out, size_t size) {
     snprintf(out, size, "OK|%s", session->id);
 }
 
-static void command_status(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_status(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     unsigned pid = parse_player_id(pid_text);
-    int who = session ? session_slot(session, pid) : -1;
-    if (who < 0) { set_error(out, size, session ? "not a member" : "no session"); return; }
+    if (!session_member_auth(session, pid, token)) { set_error(out, size, session ? "not a member" : "no session"); return; }
     touch_player(session, pid, time(NULL));
     snprintf(out, size, "OK|%s|%s|%d|%d|%d|%d", session->host_name, session->guest_name,
              session->pending, session->accepted, session->started, session->over);
@@ -351,11 +448,11 @@ static void command_status(const char *pid_text, const char *sid, char *out, siz
 
 static void command_place(const char *pid_text, const char *sid, const char *row_text,
                           const char *col_text, const char *orientation_text, const char *length_text,
-                          char *out, size_t size) {
+                          const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
     int row, col, length, index;
-    if (!session || !session->accepted || session->started || who < 0 || !length_text ||
+    if (!session_member_auth(session, parse_player_id(pid_text), token) || !session->accepted || session->started || who < 0 || !length_text ||
         session->ship_count[who] >= SHIP_COUNT) {
         set_error(out, size, "placement unavailable"); return;
     }
@@ -374,10 +471,10 @@ static void command_place(const char *pid_text, const char *sid, const char *row
     snprintf(out, size, "OK|placed");
 }
 
-static void command_ready(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_ready(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
-    if (!session || who < 0 || !session->accepted || session->ship_count[who] != SHIP_COUNT) {
+    if (!session_member_auth(session, parse_player_id(pid_text), token) || who < 0 || !session->accepted || session->ship_count[who] != SHIP_COUNT) {
         set_error(out, size, "place all five ships first"); return;
     }
     touch_player(session, parse_player_id(pid_text), time(NULL));
@@ -387,11 +484,11 @@ static void command_ready(const char *pid_text, const char *sid, char *out, size
 }
 
 static void command_shot(const char *pid_text, const char *sid, const char *row_text,
-                         const char *col_text, char *out, size_t size) {
+                         const char *col_text, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
     GameResult result;
-    if (!session || !session->started || session->over || session->paused || who != session->turn) {
+    if (!session_member_auth(session, parse_player_id(pid_text), token) || !session->started || session->over || session->paused || who != session->turn) {
         set_error(out, size, session && session->paused ? "game paused; waiting for reconnection" : "not your turn or game inactive"); return;
     }
     touch_player(session, parse_player_id(pid_text), time(NULL));
@@ -414,10 +511,10 @@ static void command_shot(const char *pid_text, const char *sid, const char *row_
     }
 }
 
-static void command_surrender(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_surrender(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     int who = session ? session_slot(session, parse_player_id(pid_text)) : -1;
-    if (!session || who < 0 || !session->started || session->over || session->paused) {
+    if (!session_member_auth(session, parse_player_id(pid_text), token) || who < 0 || !session->started || session->over || session->paused) {
         set_error(out, size, session && session->paused ? "game paused; waiting for reconnection" : "surrender unavailable");
         return;
     }
@@ -441,9 +538,10 @@ static void reset_game(Session *session) {
 }
 
 static void command_rematch(const char *pid_text, const char *sid, const char *choice,
-                            char *out, size_t size) {
+                            const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
-    if (!session || parse_player_id(pid_text) != session->host || !session->over || !choice) {
+    unsigned pid = parse_player_id(pid_text);
+    if (!session || !player_auth(pid, token) || pid != session->host || !session->over || !choice) {
         set_error(out, size, "host decision unavailable; use same or new after game"); return;
     }
     if (strcmp(choice, "same") == 0) {
@@ -466,11 +564,11 @@ static void command_rematch(const char *pid_text, const char *sid, const char *c
 
 static void reset_game(Session *session);
 
-static void command_leave(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_leave(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     unsigned pid = parse_player_id(pid_text);
     int who = session ? session_slot(session, pid) : -1;
-    if (!session || who < 0) { set_error(out, size, "not a member"); return; }
+    if (!session_member_auth(session, pid, token) || who < 0) { set_error(out, size, "not a member"); return; }
     if (session->started && !session->over) { set_error(out, size, "cannot leave an active game; surrender instead"); return; }
     if (who == 0 && session->guest) {
         session->host = session->guest;
@@ -496,10 +594,27 @@ static void command_leave(const char *pid_text, const char *sid, char *out, size
     snprintf(out, size, "OK|left; host transfer applied if needed");
 }
 
-static void command_quit(const char *pid_text, char *out, size_t size) {
+static void command_quit(const char *pid_text, const char *token, char *out, size_t size) {
     unsigned pid = parse_player_id(pid_text);
-    if (!player_find(pid)) { set_error(out, size, "invalid player"); return; }
-    if (has_active_session(pid)) { set_error(out, size, "cannot quit while a session is active"); return; }
+    Player *player = player_find(pid);
+    Session *session = active_session_for_player(pid);
+    int who;
+    if (!player || !player_auth(pid, token)) { set_error(out, size, "invalid player"); return; }
+    if (session && session->started && !session->over) {
+        set_error(out, size, "cannot quit during an active game");
+        return;
+    }
+    if (session) {
+        who = session_slot(session, pid);
+        if (who == 0 && session->guest) promote_guest_to_host(session);
+        else if (who == 1) {
+            clear_guest(session);
+            reset_game(session);
+        } else {
+            session->used = 0;
+        }
+    }
+    memset(player, 0, sizeof(*player));
     snprintf(out, size, "OK|quit allowed");
 }
 
@@ -524,8 +639,8 @@ static void encode_grid(const GameBoard *board, int target, char grid[GAME_SIZE 
             unsigned char sid  = board->ship_ids[row][col];
             char init = (sid > 0 && sid <= GAME_MAX_SHIPS) ? INITIALS[sid - 1] : 'S';
             if (shot == 2) {
-                /* Hit cell: lowercase initial of the ship */
-                grid[offset++] = (char)(init + 32);
+                /* Target grids reveal only a generic hit marker. */
+                grid[offset++] = target ? 'X' : (char)(init + 32);
             } else if (shot == 1) {
                 /* Water shot (miss) */
                 grid[offset++] = 'o';
@@ -540,7 +655,7 @@ static void encode_grid(const GameBoard *board, int target, char grid[GAME_SIZE 
     grid[offset] = '\0';
 }
 
-static void command_view(const char *pid_text, const char *sid, char *out, size_t size) {
+static void command_view(const char *pid_text, const char *sid, const char *token, char *out, size_t size) {
     Session *session = sid ? session_find(sid) : NULL;
     unsigned pid = parse_player_id(pid_text);
     int who = session ? session_slot(session, pid) : -1;
@@ -548,7 +663,7 @@ static void command_view(const char *pid_text, const char *sid, char *out, size_
     char target[GAME_SIZE * GAME_SIZE + 1];
     const char *turn_name = "-";
     const char *winner_name = "-";
-    if (!session || who < 0) { set_error(out, size, session ? "not a member" : "no session"); return; }
+    if (!session_member_auth(session, pid, token) || who < 0) { set_error(out, size, session ? "not a member" : "no session"); return; }
     touch_player(session, pid, time(NULL));
     encode_grid(&session->board[who], 0, own);
     encode_grid(&session->board[1 - who], 1, target);
@@ -561,14 +676,14 @@ static void command_view(const char *pid_text, const char *sid, char *out, size_
 void server_state_process(const char *request, char *response, size_t response_size) {
     char line[1024];
     char *save = NULL;
-    char *fields[8] = {0};
+    char *fields[10] = {0};
     char *token;
     int count = 0;
     size_t size = response_size;
     if (!request || !response || size == 0) return;
     snprintf(line, sizeof(line), "%s", request);
     token = strtok_r(line, "|", &save);
-    while (token && count < 8) {
+    while (token && count < 10) {
         fields[count++] = token;
         token = strtok_r(NULL, "|", &save);
     }
@@ -576,21 +691,21 @@ void server_state_process(const char *request, char *response, size_t response_s
     state_mutex_lock(&state_lock);
     maintenance_locked(time(NULL));
     if (!fields[0]) { /* leave default error */ }
-    else if (strcmp(fields[0], "HELLO") == 0 && count == 2) command_hello(fields[1], response, size);
+    else if (strcmp(fields[0], "HELLO") == 0 && (count == 2 || count == 3)) command_hello(fields[1], count == 3 ? fields[2] : NULL, response, size);
     else if (strcmp(fields[0], "LIST") == 0 && count == 1) command_list(response, size);
-    else if (strcmp(fields[0], "CREATE") == 0 && count == 2) command_create(fields[1], response, size);
-    else if (strcmp(fields[0], "JOIN") == 0 && count == 3) command_join(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "DECIDE") == 0 && count == 4) command_decide(fields[1], fields[2], fields[3], response, size);
-    else if (strcmp(fields[0], "RESUME") == 0 && count == 2) command_resume(fields[1], response, size);
-    else if (strcmp(fields[0], "HEARTBEAT") == 0 && count == 3) command_heartbeat(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "STATUS") == 0 && count == 3) command_status(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "PLACE") == 0 && count == 7) command_place(fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], response, size);
-    else if (strcmp(fields[0], "READY") == 0 && count == 3) command_ready(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "SHOT") == 0 && count == 5) command_shot(fields[1], fields[2], fields[3], fields[4], response, size);
-    else if (strcmp(fields[0], "SURRENDER") == 0 && count == 3) command_surrender(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "REMATCH") == 0 && count == 4) command_rematch(fields[1], fields[2], fields[3], response, size);
-    else if (strcmp(fields[0], "LEAVE") == 0 && count == 3) command_leave(fields[1], fields[2], response, size);
-    else if (strcmp(fields[0], "QUIT") == 0 && count == 2) command_quit(fields[1], response, size);
-    else if (strcmp(fields[0], "VIEW") == 0 && count == 3) command_view(fields[1], fields[2], response, size);
+    else if (strcmp(fields[0], "CREATE") == 0 && count == 3) command_create(fields[1], fields[2], response, size);
+    else if (strcmp(fields[0], "JOIN") == 0 && count == 4) command_join(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "DECIDE") == 0 && count == 5) command_decide(fields[1], fields[2], fields[3], fields[4], response, size);
+    else if (strcmp(fields[0], "RESUME") == 0 && count == 3) command_resume(fields[1], fields[2], response, size);
+    else if (strcmp(fields[0], "HEARTBEAT") == 0 && count == 4) command_heartbeat(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "STATUS") == 0 && count == 4) command_status(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "PLACE") == 0 && count == 8) command_place(fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7], response, size);
+    else if (strcmp(fields[0], "READY") == 0 && count == 4) command_ready(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "SHOT") == 0 && count == 6) command_shot(fields[1], fields[2], fields[3], fields[4], fields[5], response, size);
+    else if (strcmp(fields[0], "SURRENDER") == 0 && count == 4) command_surrender(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "REMATCH") == 0 && count == 5) command_rematch(fields[1], fields[2], fields[3], fields[4], response, size);
+    else if (strcmp(fields[0], "LEAVE") == 0 && count == 4) command_leave(fields[1], fields[2], fields[3], response, size);
+    else if (strcmp(fields[0], "QUIT") == 0 && count == 3) command_quit(fields[1], fields[2], response, size);
+    else if (strcmp(fields[0], "VIEW") == 0 && count == 4) command_view(fields[1], fields[2], fields[3], response, size);
     state_mutex_unlock(&state_lock);
 }

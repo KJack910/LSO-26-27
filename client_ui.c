@@ -29,6 +29,7 @@ static void enable_ansi(void) {}
 
 #define INPUT_CAPACITY 128
 #define RESPONSE_CAPACITY 2048
+#define PLAYER_TOKEN_SIZE 33
 #define GRID_SIDE 10
 #define GRID_CELLS 100
 #define FLEET_COUNT 5
@@ -44,6 +45,60 @@ static const char *SHIP_NAMES[FLEET_COUNT] = {
 };
 
 static const int fleet[FLEET_COUNT] = {5, 4, 3, 3, 2};
+
+static void identity_component(const char *source, char *target, size_t capacity) {
+    size_t used = 0;
+    while (*source && used + 1 < capacity) {
+        char ch = *source++;
+        target[used++] = ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') ? ch : '_';
+    }
+    target[used] = '\0';
+}
+
+static void identity_path(const char *host, const char *port, const char *name,
+                          char *path, size_t path_size) {
+    char safe_host[64], safe_port[32], safe_name[NAME_CAPACITY];
+    identity_component(host, safe_host, sizeof(safe_host));
+    identity_component(port, safe_port, sizeof(safe_port));
+    identity_component(name, safe_name, sizeof(safe_name));
+    snprintf(path, path_size, ".battleship_%s_%s_%s.id", safe_host, safe_port, safe_name);
+}
+
+static int load_identity(const char *host, const char *port, const char *name,
+                         char *token, size_t token_size) {
+    char path[256], *newline;
+    FILE *file;
+    identity_path(host, port, name, path, sizeof(path));
+    file = fopen(path, "r");
+    if (!file) return 0;
+    if (!fgets(token, (int)token_size, file)) {
+        fclose(file);
+        token[0] = '\0';
+        return 0;
+    }
+    fclose(file);
+    newline = strpbrk(token, "\r\n");
+    if (newline) *newline = '\0';
+    return token[0] != '\0';
+}
+
+static void save_identity(const char *host, const char *port, const char *name,
+                          const char *token) {
+    char path[256];
+    FILE *file;
+    identity_path(host, port, name, path, sizeof(path));
+    file = fopen(path, "w");
+    if (!file) return;
+    fprintf(file, "%s\n", token);
+    fclose(file);
+}
+
+static void clear_identity(const char *host, const char *port, const char *name) {
+    char path[256];
+    identity_path(host, port, name, path, sizeof(path));
+    remove(path);
+}
 
 static int read_input(const char *prompt, char *buffer, size_t capacity) {
     size_t length;
@@ -149,13 +204,13 @@ static void print_grids(const char *own, const char *target) {
            COL_RED,     COL_RESET);
 }
 
-static int fetch_view(const char *host, const char *port, const char *pid, const char *sid,
+static int fetch_view(const char *host, const char *port, const char *pid, const char *session_token, const char *sid,
                       char *phase, size_t phase_size, char *role, size_t role_size,
                       char *turn, size_t turn_size, char *own, char *target,
                       char *winner, size_t winner_size) {
     char command[INPUT_CAPACITY], response[RESPONSE_CAPACITY];
     char *fields[7], *cursor;
-    snprintf(command, sizeof(command), "VIEW|%s|%s", pid, sid);
+    snprintf(command, sizeof(command), "VIEW|%s|%s|%s", pid, sid, session_token);
     if (!request_server(host, port, command, response, sizeof(response)) || strncmp(response, "OK|", 3)) {
         if (response[0]) printf("Sessione non disponibile: %s\n", response);
         return 0;
@@ -182,12 +237,12 @@ static int fetch_view(const char *host, const char *port, const char *pid, const
     return 1;
 }
 
-static int fetch_status(const char *host, const char *port, const char *pid, const char *sid,
+static int fetch_status(const char *host, const char *port, const char *pid, const char *session_token, const char *sid,
                         char *host_name, char *guest_name, int *pending, int *accepted,
                         int *started, int *over) {
     char command[INPUT_CAPACITY], response[RESPONSE_CAPACITY];
     char *fields[7], *cursor;
-    snprintf(command, sizeof(command), "STATUS|%s|%s", pid, sid);
+    snprintf(command, sizeof(command), "STATUS|%s|%s|%s", pid, sid, session_token);
     if (!request_server(host, port, command, response, sizeof(response)) || strncmp(response, "OK|", 3)) return 0;
     fields[0] = response;
     cursor = response;
@@ -213,7 +268,7 @@ static int send_simple(const char *host, const char *port, const char *command) 
     return strncmp(response, "OK|", 3) == 0;
 }
 
-static int place_fleet(const char *host, const char *port, const char *pid, const char *sid,
+static int place_fleet(const char *host, const char *port, const char *pid, const char *session_token, const char *sid,
                        int *placed) {
     char input[INPUT_CAPACITY], command[INPUT_CAPACITY];
     while (*placed < FLEET_COUNT) {
@@ -233,8 +288,8 @@ static int place_fleet(const char *host, const char *port, const char *pid, cons
             continue;
         }
         if (orientation >= 'a' && orientation <= 'z') orientation -= 32; /* uppercase */
-        snprintf(command, sizeof(command), "PLACE|%s|%s|%d|%d|%c|%d",
-                 pid, sid, row, col, orientation, fleet[*placed]);
+        snprintf(command, sizeof(command), "PLACE|%s|%s|%d|%d|%c|%d|%s",
+                 pid, sid, row, col, orientation, fleet[*placed], session_token);
         if (send_simple(host, port, command)) {
             printf("Nave posizionata.\n");
             ++*placed;
@@ -242,31 +297,32 @@ static int place_fleet(const char *host, const char *port, const char *pid, cons
             puts("Posizione non valida (fuori griglia, sovrapposizione, orientamento errato). Riprova.");
         }
     }
-    snprintf(command, sizeof(command), "READY|%s|%s", pid, sid);
+    snprintf(command, sizeof(command), "READY|%s|%s|%s", pid, sid, session_token);
     return send_simple(host, port, command);
 }
 
 static void session_screen(const char *host, const char *port, const char *pid,
-                           const char *player_name, const char *sid, int is_host) {
+                           const char *player_token, const char *player_name, const char *sid, int is_host) {
     int placed = 0;
     char prev_phase[32] = "";  /* tracks previous phase to detect rematch transition */
+    char prev_role[16] = "";
     char input[INPUT_CAPACITY], command[INPUT_CAPACITY];
     char phase[32], role[16], turn[NAME_CAPACITY], winner[NAME_CAPACITY];
     char own[GRID_CELLS + 1], target[GRID_CELLS + 1];
     ClientPresence *presence = NULL;
-    if (client_presence_start(host, port, pid, sid, &presence) != 0) {
+    if (client_presence_start(host, port, pid, sid, player_token, &presence) != 0) {
         puts("Impossibile avviare il monitor di connessione della partita.");
         return;
     }
     for (;;) {
         char host_name[NAME_CAPACITY] = "", guest_name[NAME_CAPACITY] = "";
         int pending = 0, accepted = 0, started = 0, over = 0;
-        if (!fetch_status(host, port, pid, sid, host_name, guest_name,
+        if (!fetch_status(host, port, pid, player_token, sid, host_name, guest_name,
                           &pending, &accepted, &started, &over)) {
             puts("Non sei piu' membro della sessione o il server non risponde.");
             goto session_done;
         }
-        if (!fetch_view(host, port, pid, sid, phase, sizeof(phase), role, sizeof(role),
+        if (!fetch_view(host, port, pid, player_token, sid, phase, sizeof(phase), role, sizeof(role),
                         turn, sizeof(turn), own, target, winner, sizeof(winner))) goto session_done;
         is_host = strcmp(role, "HOST") == 0;
 
@@ -274,23 +330,26 @@ static void session_screen(const char *host, const char *port, const char *pid,
          * client's 'placed' counter from the previous game would still be 5.
          * Detect the FINISHED -> PLACEMENT transition and reset placed=0 so
          * the player is asked to position all ships again for the new game. */
-        if (strcmp(prev_phase, "FINISHED") == 0 &&
-            (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0)) {
+        if (strcmp(prev_role, "GUEST") == 0 && strcmp(role, "HOST") == 0) {
+            placed = 0;
+        } else if (strcmp(prev_phase, "FINISHED") == 0 &&
+                   (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0)) {
             placed = 0;
         }
         snprintf(prev_phase, sizeof(prev_phase), "%s", phase);
+        snprintf(prev_role, sizeof(prev_role), "%s", role);
 
 
         if (strcmp(phase, "REQUEST_PENDING") == 0 && is_host) {
             printf("\n%s chiede di unirsi alla sessione.\n", guest_name);
             if (!read_input("Accettare? (s/n, oppure E per uscire): ", input, sizeof(input))) goto session_done;
             if (input[0] == 'e' || input[0] == 'E') {
-                snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                snprintf(command, sizeof(command), "LEAVE|%s|%s|%s", pid, sid, player_token);
                 if (send_simple(host, port, command)) goto session_done;
                 continue;
             }
-            snprintf(command, sizeof(command), "DECIDE|%s|%s|%d", pid, sid,
-                     input[0] == 's' || input[0] == 'S');
+            snprintf(command, sizeof(command), "DECIDE|%s|%s|%d|%s", pid, sid,
+                     input[0] == 's' || input[0] == 'S', player_token);
             send_simple(host, port, command);
             continue;
         }
@@ -313,7 +372,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
             continue;
         }
         if (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0) {
-            if (placed < FLEET_COUNT && !place_fleet(host, port, pid, sid, &placed)) continue;
+            if (placed < FLEET_COUNT && !place_fleet(host, port, pid, player_token, sid, &placed)) continue;
             puts("Flotta pronta: in attesa dell'avversario.");
             if (!read_input("Premi INVIO per aggiornare (oppure E per uscire): ", input, sizeof(input))) goto session_done;
             if (input[0] == 'e' || input[0] == 'E') {
@@ -332,7 +391,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
                 puts("Turno dell'avversario.");
                 if (!read_input("Premi INVIO per aggiornare (Q per arrenderti): ", input, sizeof(input))) goto session_done;
                 if (input[0] == 'q' || input[0] == 'Q') {
-                    snprintf(command, sizeof(command), "SURRENDER|%s|%s", pid, sid);
+                    snprintf(command, sizeof(command), "SURRENDER|%s|%s|%s", pid, sid, player_token);
                     if (send_simple(host, port, command)) {
                         puts("Ti sei arreso: partita persa. La sessione resta disponibile per il risultato e la rivincita.");
                         continue;
@@ -342,7 +401,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
             }
             if (!read_input("Tiro riga colonna (es. 4 7), oppure Q per resa: ", input, sizeof(input))) goto session_done;
             if (input[0] == 'q' || input[0] == 'Q') {
-                snprintf(command, sizeof(command), "SURRENDER|%s|%s", pid, sid);
+                snprintf(command, sizeof(command), "SURRENDER|%s|%s|%s", pid, sid, player_token);
                 if (send_simple(host, port, command)) {
                     puts("Ti sei arreso: partita persa. La sessione resta disponibile per il risultato e la rivincita.");
                     continue;
@@ -355,7 +414,7 @@ static void session_screen(const char *host, const char *port, const char *pid,
                     puts("Coordinate non valide.");
                     continue;
                 }
-                snprintf(command, sizeof(command), "SHOT|%s|%s|%d|%d", pid, sid, row, col);
+                snprintf(command, sizeof(command), "SHOT|%s|%s|%d|%d|%s", pid, sid, row, col, player_token);
                 send_simple(host, port, command);
             }
             continue;
@@ -368,11 +427,15 @@ static void session_screen(const char *host, const char *port, const char *pid,
                     char decision[INPUT_CAPACITY];
                     puts("  1  Rivincita\n  2  Nuovo avversario");
                     if (!read_input("Scelta: ", decision, sizeof(decision))) goto session_done;
-                    snprintf(command, sizeof(command), "REMATCH|%s|%s|%s", pid, sid,
-                             decision[0] == '1' ? "same" : "new");
+                    if (decision[0] != '1' && decision[0] != '2') {
+                        puts("Scelta non valida: inserisci 1 o 2.");
+                        continue;
+                    }
+                    snprintf(command, sizeof(command), "REMATCH|%s|%s|%s|%s", pid, sid,
+                             decision[0] == '1' ? "same" : "new", player_token);
                     if (send_simple(host, port, command)) placed = 0;
                 } else if (input[0] == 'e' || input[0] == 'E') {
-                    snprintf(command, sizeof(command), "LEAVE|%s|%s", pid, sid);
+                    snprintf(command, sizeof(command), "LEAVE|%s|%s|%s", pid, sid, player_token);
                     if (send_simple(host, port, command)) goto session_done;
                 }
             } else {
@@ -393,53 +456,76 @@ session_done:
 
 int client_run(const char *host, const char *port) {
     char name[INPUT_CAPACITY], command[RESPONSE_CAPACITY], response[RESPONSE_CAPACITY];
-    char player_id[32], choice[INPUT_CAPACITY], session_id[16];
+    char player_id[32], player_token[PLAYER_TOKEN_SIZE], choice[INPUT_CAPACITY], session_id[16];
+    int had_saved_identity;
     enable_ansi();
+    player_token[0] = '\0';
     if (!read_input("Nome giocatore: ", name, sizeof(name)) || !name[0] || strchr(name, '|')) {
         puts("Nome non valido.");
         return 1;
     }
-    snprintf(command, sizeof(command), "HELLO|%s", name);
+    had_saved_identity = load_identity(host, port, name, player_token, sizeof(player_token));
+    if (had_saved_identity) snprintf(command, sizeof(command), "HELLO|%s|%s", name, player_token);
+    else snprintf(command, sizeof(command), "HELLO|%s", name);
     if (!request_server(host, port, command, response, sizeof(response)) || strncmp(response, "OK|", 3)) {
-        fprintf(stderr, "Registrazione non riuscita: %s\n", response);
-        return 1;
+        if (had_saved_identity) {
+            clear_identity(host, port, name);
+            player_token[0] = '\0';
+            snprintf(command, sizeof(command), "HELLO|%s", name);
+            if (!request_server(host, port, command, response, sizeof(response)) || strncmp(response, "OK|", 3)) {
+                fprintf(stderr, "Registrazione non riuscita: %s\n", response);
+                return 1;
+            }
+        } else {
+            fprintf(stderr, "Registrazione non riuscita: %s\n", response);
+            return 1;
+        }
     }
     {
-        char *separator = strchr(response + 3, '|');
-        if (!separator) return 1;
-        *separator = '\0';
+        char *id_end = strchr(response + 3, '|');
+        char *name_end;
+        if (!id_end) return 1;
+        *id_end = '\0';
+        name_end = strchr(id_end + 1, '|');
+        if (!name_end) return 1;
+        *name_end = '\0';
         snprintf(player_id, sizeof(player_id), "%s", response + 3);
-        snprintf(name, sizeof(name), "%s", separator + 1);
+        snprintf(name, sizeof(name), "%s", id_end + 1);
+        snprintf(player_token, sizeof(player_token), "%s", name_end + 1);
     }
+    save_identity(host, port, name, player_token);
     printf("\nBenvenuto, %s. ID giocatore: %s\n", name, player_id);
-    snprintf(command, sizeof(command), "RESUME|%s", player_id);
+    snprintf(command, sizeof(command), "RESUME|%s|%s", player_id, player_token);
     if (request_server(host, port, command, response, sizeof(response)) && !strncmp(response, "OK|", 3)) {
         snprintf(session_id, sizeof(session_id), "%s", response + 3);
         puts("Sessione attiva trovata: riconnessione automatica.");
-        session_screen(host, port, player_id, name, session_id, 0);
+        session_screen(host, port, player_id, player_token, name, session_id, 0);
     }
     for (;;) {
         print_lobby(host, port);
         puts("\nMENU PRINCIPALE\n  1  Crea una partita\n  2  Aggiorna la lobby\n  3  Unisciti a una sessione\n  0  Esci");
         if (!read_input("Scelta: ", choice, sizeof(choice))) return 0;
         if (choice[0] == '0') {
-            snprintf(command, sizeof(command), "QUIT|%s", player_id);
-            if (send_simple(host, port, command)) return 0;
+            snprintf(command, sizeof(command), "QUIT|%s|%s", player_id, player_token);
+            if (send_simple(host, port, command)) {
+                clear_identity(host, port, name);
+                return 0;
+            }
         } else if (choice[0] == '1') {
-            snprintf(command, sizeof(command), "CREATE|%s", player_id);
+            snprintf(command, sizeof(command), "CREATE|%s|%s", player_id, player_token);
             if (request_server(host, port, command, response, sizeof(response)) && !strncmp(response, "OK|", 3)) {
                 snprintf(session_id, sizeof(session_id), "%s", response + 3);
                 printf("Sessione creata: %s. Accesso diretto alla lobby.\n", session_id);
-                session_screen(host, port, player_id, name, session_id, 1);
+                session_screen(host, port, player_id, player_token, name, session_id, 1);
             } else puts(response);
         } else if (choice[0] == '2') {
             continue;
         } else if (choice[0] == '3') {
             if (!read_input("ID sessione (S seguito da 5 cifre): ", session_id, sizeof(session_id))) return 0;
-            snprintf(command, sizeof(command), "JOIN|%s|%s", player_id, session_id);
+            snprintf(command, sizeof(command), "JOIN|%s|%s|%s", player_id, session_id, player_token);
             if (request_server(host, port, command, response, sizeof(response)) && !strncmp(response, "OK|", 3)) {
                 puts("Richiesta inviata. Accesso alla lobby della sessione.");
-                session_screen(host, port, player_id, name, session_id, 0);
+                session_screen(host, port, player_id, player_token, name, session_id, 0);
             } else puts(response);
         } else puts("Scelta non riconosciuta.");
     }
