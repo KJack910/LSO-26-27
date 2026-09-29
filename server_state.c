@@ -356,10 +356,10 @@ static void command_create(const char *pid_text, const char *token, char *out, s
     session->connected[0] = 1;
     session->last_seen[0] = time(NULL);
     snprintf(session->host_name, sizeof(session->host_name), "%s", player->name);
+    unsigned test_id = 1;
     for (attempts = 0; attempts < 99999; ++attempts) {
         int collision = 0;
-        snprintf(session->id, sizeof(session->id), "S%05u", next_session);
-        next_session = next_session == 99999 ? 1 : next_session + 1;
+        snprintf(session->id, sizeof(session->id), "S%05u", test_id);
         for (i = 0; i < MAX_SESSIONS; ++i) {
             if (&sessions[i] != session && sessions[i].used &&
                 strcmp(sessions[i].id, session->id) == 0) {
@@ -368,6 +368,7 @@ static void command_create(const char *pid_text, const char *token, char *out, s
             }
         }
         if (!collision) break;
+        test_id++;
     }
     if (attempts == 99999) {
         memset(session, 0, sizeof(*session));
