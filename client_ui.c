@@ -188,9 +188,9 @@ static void print_grids(const char *own, const char *target) {
         printf("             %2d  ", row);
         for (col = 0; col < GRID_SIDE; ++col) {
             char ch = target[row * GRID_SIDE + col];
-            if (ch >= 'a' && ch <= 'z' && ch != 'o') printf("%sX%s ", COL_RED, COL_RESET); /* hit */
-            else if (ch == 'o')                      printf("o ");                          /* water */
-            else                                     printf(". ");                          /* unknown */
+            if ((ch >= 'a' && ch <= 'z' && ch != 'o') || ch == 'X') printf("%sX%s ", COL_RED, COL_RESET); /* hit */
+            else if (ch == 'o')                                     printf("o ");                          /* water */
+            else                                                    printf(". ");                          /* unknown */
         }
         putchar('\n');
     }
@@ -271,34 +271,40 @@ static int send_simple(const char *host, const char *port, const char *command) 
 static int place_fleet(const char *host, const char *port, const char *pid, const char *session_token, const char *sid,
                        int *placed) {
     char input[INPUT_CAPACITY], command[INPUT_CAPACITY];
-    while (*placed < FLEET_COUNT) {
-        int row, col;
-        char orientation;
-        printf("\n--- Nave %d/5: %s ---\n", *placed + 1, SHIP_NAMES[*placed]);
-        puts("Inserisci riga, colonna e orientamento (H=orizzontale, V=verticale).");
-        if (!read_input("Es. \"2 3 H\" (oppure E per uscire): ", input, sizeof(input))) return 0;
-        if (input[0] == 'e' || input[0] == 'E') {
-            snprintf(command, sizeof(command), "LEAVE|%s|%s|%s", pid, sid, session_token);
-            send_simple(host, port, command);
-            return 0;
-        }
-        char extra;
-        if (sscanf(input, "%d %d %c %c", &row, &col, &orientation, &extra) != 3) {
-            puts("Errore: devi inserire SOLO riga, colonna e orientamento (es. 2 3 H).");
-            continue;
-        }
-        if (orientation >= 'a' && orientation <= 'z') orientation -= 32; /* uppercase */
-        snprintf(command, sizeof(command), "PLACE|%s|%s|%d|%d|%c|%d|%s",
-                 pid, sid, row, col, orientation, fleet[*placed], session_token);
-        if (send_simple(host, port, command)) {
-            printf("Nave posizionata.\n");
-            ++*placed;
-        } else {
-            puts("Posizione non valida (fuori griglia, sovrapposizione, orientamento errato). Riprova.");
-        }
+    if (*placed >= FLEET_COUNT) return 1;
+
+    int row, col;
+    char orientation;
+    printf("\n--- Nave %d/5: %s ---\n", *placed + 1, SHIP_NAMES[*placed]);
+    puts("Inserisci riga, colonna e orientamento (H=orizzontale, V=verticale).");
+    if (!read_input("Es. \"2 3 H\" (oppure E per uscire, INVIO per aggiornare): ", input, sizeof(input))) return 0;
+    if (input[0] == '\0') return 0;
+    if (input[0] == 'e' || input[0] == 'E') {
+        snprintf(command, sizeof(command), "LEAVE|%s|%s|%s", pid, sid, session_token);
+        send_simple(host, port, command);
+        return -1;
     }
-    snprintf(command, sizeof(command), "READY|%s|%s|%s", pid, sid, session_token);
-    return send_simple(host, port, command);
+    char extra;
+    if (sscanf(input, "%d %d %c %c", &row, &col, &orientation, &extra) != 3) {
+        puts("Errore: devi inserire SOLO riga, colonna e orientamento (es. 2 3 H).");
+        return 0;
+    }
+    if (orientation >= 'a' && orientation <= 'z') orientation -= 32;
+    snprintf(command, sizeof(command), "PLACE|%s|%s|%d|%d|%c|%d|%s",
+             pid, sid, row, col, orientation, fleet[*placed], session_token);
+    if (send_simple(host, port, command)) {
+        printf("Nave posizionata.\n");
+        ++*placed;
+    } else {
+        puts("Posizione non valida (fuori griglia, sovrapposizione, orientamento errato). Riprova.");
+    }
+    
+    if (*placed == FLEET_COUNT) {
+        snprintf(command, sizeof(command), "READY|%s|%s|%s", pid, sid, session_token);
+        send_simple(host, port, command);
+        return 1;
+    }
+    return 0;
 }
 
 static void session_screen(const char *host, const char *port, const char *pid,
@@ -372,7 +378,11 @@ static void session_screen(const char *host, const char *port, const char *pid,
             continue;
         }
         if (strcmp(phase, "PLACEMENT") == 0 || strcmp(phase, "WAITING_READY") == 0) {
-            if (placed < FLEET_COUNT && !place_fleet(host, port, pid, player_token, sid, &placed)) continue;
+            if (placed < FLEET_COUNT) {
+                int res = place_fleet(host, port, pid, player_token, sid, &placed);
+                if (res == -1) goto session_done;
+                continue;
+            }
             puts("Flotta pronta: in attesa dell'avversario.");
             if (!read_input("Premi INVIO per aggiornare (oppure E per uscire): ", input, sizeof(input))) goto session_done;
             if (input[0] == 'e' || input[0] == 'E') {

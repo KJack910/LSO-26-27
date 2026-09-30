@@ -192,7 +192,7 @@ static void maintenance_locked(time_t now) {
         Session *session = &sessions[i];
         int disconnected = -1;
         int who;
-        int skip_survivor_check = session->started && !session->over && session->paused;
+        int skip_survivor_check = session->accepted && !session->over && session->paused;
         if (!session->used) continue;
 
         if (!skip_survivor_check) {
@@ -214,7 +214,7 @@ static void maintenance_locked(time_t now) {
             continue;
         }
 
-        if (!session->started) {
+        if (!session->accepted) {
             if (!session->connected[0]) {
                 if (session->guest && session->connected[1]) promote_guest_to_host(session);
                 else session->used = 0;
@@ -235,6 +235,19 @@ static void maintenance_locked(time_t now) {
                     session->over = 1;
                     session->paused = 0;
                     session->winner = session->connected[0] ? session->host : session->guest;
+                    
+                    if (!session->connected[0] && session->connected[1]) {
+                        /* Promote guest to host so they can make the post-game decision, retaining over=1 */
+                        session->host = session->guest;
+                        snprintf(session->host_name, sizeof(session->host_name), "%s", session->guest_name);
+                        session->connected[0] = session->connected[1];
+                        session->last_seen[0] = session->last_seen[1];
+                        session->guest = 0;
+                        session->guest_name[0] = '\0';
+                        session->connected[1] = 0;
+                        session->last_seen[1] = 0;
+                        session->winner = session->host;
+                    }
                 } else {
                     session->used = 0;
                 }
@@ -424,6 +437,7 @@ static void command_heartbeat(const char *pid_text, const char *sid, const char 
     was_paused = session->paused;
     touch_player(session, pid, time(NULL));
     if (was_paused && !session->paused) snprintf(out, size, "OK|RECONNECTED");
+    else if (session->paused) snprintf(out, size, "OK|PAUSED");
     else snprintf(out, size, "OK|HEARTBEAT");
 }
 

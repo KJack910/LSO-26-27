@@ -105,11 +105,25 @@ static presence_thread_return_t presence_worker(void *raw) {
     char request[CLIENT_MESSAGE_CAPACITY];
     char response[CLIENT_MESSAGE_CAPACITY];
     int waited;
+    int was_paused = 0;
 
     while (presence->running) {
         snprintf(request, sizeof(request), "HEARTBEAT|%s|%s|%s", presence->pid, presence->sid, presence->token);
-        (void)client_request(presence->host, presence->port, request,
-                             response, sizeof(response));
+        if (client_request(presence->host, presence->port, request, response, sizeof(response)) == 0) {
+            if (strncmp(response, "OK|PAUSED", 9) == 0) {
+                if (!was_paused) {
+                    printf("\n\n[!] ATTENZIONE: L'avversario si e' disconnesso! (Premi INVIO per aggiornare)\n> ");
+                    fflush(stdout);
+                    was_paused = 1;
+                }
+            } else if (strncmp(response, "ERR|session unavailable", 23) == 0) {
+                printf("\n\n[!] ATTENZIONE: Partita annullata/vinta per abbandono! (Premi INVIO per aggiornare)\n> ");
+                fflush(stdout);
+                break;
+            } else {
+                was_paused = 0;
+            }
+        }
         for (waited = 0; waited < SERVER_HEARTBEAT_INTERVAL_SECONDS && presence->running; ++waited) {
 #ifdef _WIN32
             Sleep(1000);
