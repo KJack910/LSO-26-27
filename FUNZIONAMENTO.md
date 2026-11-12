@@ -88,5 +88,7 @@ Il client resetta il contatore locale delle navi quando rileva una nuova partita
 |---|---|---|---|
 | P01 | RESUME dopo timeout | Errore per host rimosso | PASS |
 | P02 | Host assente prima del gioco | Pausa, rientro e promozione dopo timeout | PASS |
-| P03 | Rivincita end-to-end | Reset flotta e nuova partita con stessi giocatori | PASS |
-| P04 | Uscita e risultato finale UI | Esito e abbandono verificati per entrambi i giocatori | PASS |
+| P03 | Rivincita completa via protocollo | Reset di entrambe le flotte e nuova partita con gli stessi giocatori | PASS |
+| P04 | Risultato e uscita via protocollo | VIEW mostra il vincitore a entrambi; LEAVE ospite e poi host | PASS |
+
+P03 e P04 esercitano il protocollo server, non due client interattivi. La schermata vittoria/sconfitta è implementata nel client ma non è verificata da questi test automatici; T14 copre soltanto avvio, menu e uscita del client.
