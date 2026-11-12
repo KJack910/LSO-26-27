@@ -97,21 +97,24 @@ def main():
         assert request(port, f"RESUME|{alice_id}|{alice_token}") == f"OK|{session}"
         assert request(port, f"REMATCH|{alice_id}|{session}|bad|{alice_token}").startswith("ERR|")
 
-        # Pregame host loss promotes the connected guest and resets placement.
+        # An accepted pregame session pauses after host loss, then resumes on return.
         host_id, host_token = hello(port, "PregameHost")
         guest_id, guest_token = hello(port, "PregameGuest")
         pregame = request(port, f"CREATE|{host_id}|{host_token}").split("|")[1]
         assert request(port, f"JOIN|{guest_id}|{pregame}|{guest_token}") == "OK|request sent"
         assert request(port, f"DECIDE|{host_id}|{pregame}|1|{host_token}") == "OK|accepted"
         deadline = time.monotonic() + 16
+        state = []
         while time.monotonic() < deadline:
             time.sleep(3)
             request(port, f"HEARTBEAT|{guest_id}|{pregame}|{guest_token}")
             state = request(port, f"VIEW|{guest_id}|{pregame}|{guest_token}").split("|")
-            if state[2] == "HOST":
+            if state[1:3] == ["PAUSED", "GUEST"]:
                 break
-        assert state[2] == "HOST", state
-        assert state[1] in {"WAITING_REQUEST", "PLACEMENT", "WAITING_READY"}, state
+        assert state[1:3] == ["PAUSED", "GUEST"], state
+        assert request(port, f"HEARTBEAT|{host_id}|{pregame}|{host_token}") == "OK|RECONNECTED"
+        state = request(port, f"VIEW|{guest_id}|{pregame}|{guest_token}").split("|")
+        assert state[1:3] == ["PLACEMENT", "GUEST"], state
 
         # Client can still start, authenticate, and exit through the UI.
         smoke_name = f"TerminalSmoke{port}"

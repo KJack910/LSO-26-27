@@ -215,6 +215,17 @@ static void test_resume_after_timeout_and_target_privacy(void) {
     setup_started_game(session_id, sizeof(session_id));
     snprintf(command, sizeof(command), "SHOT|%u|%s|5|0|%s", alice_id, session_id, alice_token);
     expect_prefix(command, "OK|HIT");
+    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", alice_id, session_id, alice_token);
+    call(command, response, sizeof(response));
+    fields[0] = response;
+    cursor = response;
+    for (i = 1; i < 7; ++i) {
+        cursor = strchr(cursor, '|');
+        assert(cursor != NULL);
+        *cursor++ = '\0';
+        fields[i] = cursor;
+    }
+    assert(fields[5][50] == 'X');
     snprintf(command, sizeof(command), "HEARTBEAT|%u|%s|%s", alice_id, session_id, alice_token);
     expect_prefix(command, "OK|");
     snprintf(command, sizeof(command), "HEARTBEAT|%u|%s|%s", bob_id, session_id, bob_token);
@@ -227,18 +238,38 @@ static void test_resume_after_timeout_and_target_privacy(void) {
 
     snprintf(command, sizeof(command), "RESUME|%u|%s", alice_id, alice_token);
     call(command, response, sizeof(response));
-    assert(strcmp(response, "OK|S00001") == 0);
-    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", alice_id, session_id, alice_token);
+    assert(strcmp(response, "ERR|no active session") == 0);
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "FINISHED", "Bob");
+    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", bob_id, session_id, bob_token);
     call(command, response, sizeof(response));
-    fields[0] = response;
-    cursor = response;
-    for (i = 1; i < 7; ++i) {
-        cursor = strchr(cursor, '|');
-        assert(cursor != NULL);
-        *cursor++ = '\0';
-        fields[i] = cursor;
-    }
-    assert(fields[5][50] == 'X');
+    assert(strncmp(response, "OK|FINISHED|HOST|", strlen("OK|FINISHED|HOST|")) == 0);
+}
+
+static void test_accepted_pregame_host_disconnect(void) {
+    char session_id[16], command[256], response[SERVER_RESPONSE_SIZE];
+    time_t base;
+    server_state_init();
+    register_player("Host", &alice_id, alice_token, sizeof(alice_token));
+    register_player("Guest", &bob_id, bob_token, sizeof(bob_token));
+    snprintf(command, sizeof(command), "CREATE|%u|%s", alice_id, alice_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|S", 4) == 0);
+    snprintf(session_id, sizeof(session_id), "%s", response + 3);
+    snprintf(command, sizeof(command), "JOIN|%u|%s|%s", bob_id, session_id, bob_token);
+    expect_exact(command, "OK|request sent");
+    snprintf(command, sizeof(command), "DECIDE|%u|%s|1|%s", alice_id, session_id, alice_token);
+    expect_exact(command, "OK|accepted");
+    base = time(NULL);
+    server_state_maintenance_at(base + SERVER_HEARTBEAT_STALE_SECONDS + 1);
+    snprintf(command, sizeof(command), "HEARTBEAT|%u|%s|%s", bob_id, session_id, bob_token);
+    expect_prefix(command, "OK|");
+    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", bob_id, session_id, bob_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|PAUSED|GUEST|", strlen("OK|PAUSED|GUEST|")) == 0);
+    server_state_maintenance_at(base + SERVER_DISCONNECT_TIMEOUT_SECONDS + 1);
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "FINISHED", "Guest");
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|FINISHED|HOST|", strlen("OK|FINISHED|HOST|")) == 0);
 }
 
 int main(void) {
@@ -250,6 +281,7 @@ int main(void) {
     test_quit_releases_player_slots();
     test_duplicate_names_and_token_authentication();
     test_resume_after_timeout_and_target_privacy();
+    test_accepted_pregame_host_disconnect();
     puts("server state regression rules passed");
     return 0;
 }
