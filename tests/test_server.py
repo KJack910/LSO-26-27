@@ -97,6 +97,28 @@ def main():
         assert request(port, f"RESUME|{alice_id}|{alice_token}") == f"OK|{session}"
         assert request(port, f"REMATCH|{alice_id}|{session}|bad|{alice_token}").startswith("ERR|")
 
+        # P03: Rematch end-to-end
+        assert request(port, f"REMATCH|{alice_id}|{session}|same|{alice_token}") == "OK|rematch started"
+        assert request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")[1] == "PLACEMENT"
+        assert request(port, f"VIEW|{bob_id}|{session}|{bob_token}").split("|")[1] == "PLACEMENT"
+        rematch_fleet = [5, 4, 3, 3, 2]
+        for offset, length in enumerate(rematch_fleet):
+            assert request(port, f"PLACE|{alice_id}|{session}|{offset}|0|H|{length}|{alice_token}") == "OK|placed"
+            assert request(port, f"PLACE|{bob_id}|{session}|{offset+5}|0|H|{length}|{bob_token}") == "OK|placed"
+        assert request(port, f"READY|{alice_id}|{session}|{alice_token}") == "OK|waiting for opponent"
+        assert request(port, f"READY|{bob_id}|{session}|{bob_token}") == "OK|game started"
+        assert request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")[1] == "PLAYING"
+
+        # P04: Uscita e risultato finale per entrambi
+        assert request(port, f"SURRENDER|{alice_id}|{session}|{alice_token}") == "OK|SURRENDER|WIN"
+        v_alice = request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")
+        v_bob = request(port, f"VIEW|{bob_id}|{session}|{bob_token}").split("|")
+        assert v_alice[1] == "FINISHED" and v_alice[6] == "Bob"
+        assert v_bob[1] == "FINISHED" and v_bob[6] == "Bob"
+        assert request(port, f"LEAVE|{bob_id}|{session}|{bob_token}").startswith("OK|")
+        assert request(port, f"VIEW|{alice_id}|{session}|{alice_token}").split("|")[1] == "WAITING_REQUEST"
+        assert request(port, f"LEAVE|{alice_id}|{session}|{alice_token}").startswith("OK|")
+
         # An accepted pregame session pauses after host loss, then resumes on return.
         host_id, host_token = hello(port, "PregameHost")
         guest_id, guest_token = hello(port, "PregameGuest")

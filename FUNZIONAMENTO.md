@@ -35,7 +35,7 @@ Tutti i comandi che accedono a un giocatore richiedono il token come ultimo camp
 - `CREATE|pid|token` → `OK|sid`; rifiuta se il giocatore ha già una sessione attiva.
 - `JOIN|pid|sid|token` → registra la richiesta; l'host usa `DECIDE|pid|sid|1|token` per accettare o `...|0|token` per rifiutare.
 - `STATUS|pid|sid|token` → restituisce host, ospite e indicatori pending/accepted/started/over.
-- `RESUME|pid|token` → `OK|sid` per una sessione ancora assegnata al giocatore, anche se è già `FINISHED`; questo permette di vedere una sconfitta a tavolino e scegliere la rivincita.
+- `RESUME|pid|token` → `OK|sid` per una sessione ancora assegnata al giocatore; se il giocatore è stato rimosso per scadenza del timeout restituisce `ERR|no active session`.
 - `HEARTBEAT|pid|sid|token` → mantiene online il giocatore e rimuove `PAUSED` quando entrambi sono rientrati.
 - `VIEW|pid|sid|token` → `OK|fase|ruolo|turno|griglia-propria|bersagli|vincitore`.
 - `PLACE|pid|sid|riga|colonna|H-or-V|lunghezza|token` → colloca la flotta 5,4,3,3,2.
@@ -58,3 +58,35 @@ La manutenzione controlla anche le lobby non ancora iniziate e le sessioni termi
 Il client resetta il contatore locale delle navi quando rileva una nuova partita o il passaggio da ospite a host, evitando il softlock del posizionamento. Le scelte post-partita accettano soltanto `1` o `2`; un input vuoto o diverso non espelle l'avversario.
 
 `server.c` gestisce listener e thread; `server_state.c` gestisce autenticazione, comandi, heartbeat, timeout e sessioni; `client_net.c` incapsula le richieste TCP e il monitor di presenza; `client_ui.c` gestisce menu e griglie; `game.c` contiene le regole della plancia 10x10.
+
+## Matrice dei Test
+
+### Regole di Gioco (game_rules)
+| ID | Caso verificato | Atteso / Evidenza | Esito |
+|---|---|---|---|
+| T01 | Piazzamento valido | Nave accettata; game_rules | PASS |
+| T02 | Sovrapposizione | Piazzamento rifiutato; game_rules | PASS |
+| T03 | Nave oltre bordo | Piazzamento rifiutato; game_rules | PASS |
+| T04 | Colpo ripetuto | Secondo colpo rifiutato; game_rules | PASS |
+| T05 | Acqua e colpito | Risposta MISS o HIT; game_rules | PASS |
+| T06 | Affondamento | SUNK e flotta esaurita; game_rules | PASS |
+
+### Stato e Protocollo (server_state_rules & server_protocol)
+| ID | Caso osservato | Evidenza | Esito |
+|---|---|---|---|
+| T07 | Resa e vincitore | VIEW mostra vincitore; server_state_rules | PASS |
+| T08 | Token e nomi duplicati | Token errato rifiutato; server_state_rules | PASS |
+| T09 | Identità e flotta | HELLO, JOIN, DECIDE, PLACE e READY; server_protocol | PASS |
+| T10 | Griglia bersagli | Colpo rappresentato con X; server_protocol | PASS |
+| T11 | RESUME dopo timeout | Host rimosso: ERR\|no active session; server_state_rules | PASS |
+| T12 | Pausa e promozione | Ospite GUEST in pausa, poi HOST; tempo simulato | PASS |
+| T13 | Rientro host | HEARTBEAT riprende il piazzamento; server_protocol | PASS |
+| T14 | Client interattivo | Avvio e uscita: smoke test; server_protocol | PASS |
+
+### Scenari di Integrazione
+| ID | Scenario | Obiettivo | Stato |
+|---|---|---|---|
+| P01 | RESUME dopo timeout | Errore per host rimosso | PASS |
+| P02 | Host assente prima del gioco | Pausa, rientro e promozione dopo timeout | PASS |
+| P03 | Rivincita end-to-end | Reset flotta e nuova partita con stessi giocatori | PASS |
+| P04 | Uscita e risultato finale UI | Esito e abbandono verificati per entrambi i giocatori | PASS |

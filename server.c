@@ -7,10 +7,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
-typedef DWORD WINAPI thread_return_t;
+typedef DWORD thread_return_t;
 typedef LPVOID thread_arg_t;
 typedef CRITICAL_SECTION WorkerMutex;
-#define start_thread(handle, entry, arg) ((*(handle) = CreateThread(NULL, 0, entry, arg, 0, NULL)) != NULL)
+#define THREAD_CALL CONV
+#define start_thread(handle, entry, arg) ((*(handle) = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)(entry), arg, 0, NULL)) != NULL)
 #define worker_mutex_init(m) InitializeCriticalSection(m)
 #define worker_mutex_lock(m) EnterCriticalSection(m)
 #define worker_mutex_unlock(m) LeaveCriticalSection(m)

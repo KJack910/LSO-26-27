@@ -272,6 +272,91 @@ static void test_accepted_pregame_host_disconnect(void) {
     assert(strncmp(response, "OK|FINISHED|HOST|", strlen("OK|FINISHED|HOST|")) == 0);
 }
 
+static void test_p03_rematch_end_to_end(void) {
+    char session_id[16], command[256], response[SERVER_RESPONSE_SIZE];
+    const int fleet_lens[] = {5, 4, 3, 3, 2};
+    server_state_init();
+    setup_started_game(session_id, sizeof(session_id));
+
+    /* Alice surrenders -> Bob wins */
+    snprintf(command, sizeof(command), "SURRENDER|%u|%s|%s", alice_id, session_id, alice_token);
+    expect_exact(command, "OK|SURRENDER|WIN");
+    assert_view_phase_and_winner(session_id, alice_id, alice_token, "FINISHED", "Bob");
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "FINISHED", "Bob");
+
+    /* Host (Alice) initiates rematch */
+    snprintf(command, sizeof(command), "REMATCH|%u|%s|same|%s", alice_id, session_id, alice_token);
+    expect_exact(command, "OK|rematch started");
+
+    /* Phase transitions back to PLACEMENT for both */
+    assert_view_phase_and_winner(session_id, alice_id, alice_token, "PLACEMENT", "-");
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "PLACEMENT", "-");
+
+    /* Both players place all 5 ships again */
+    for (int p = 1; p <= 2; ++p) {
+        unsigned id = (p == 1) ? alice_id : bob_id;
+        const char *token = (p == 1) ? alice_token : bob_token;
+        int row = (p == 1) ? 0 : 5;
+        for (int offset = 0; offset < 5; ++offset) {
+            snprintf(command, sizeof(command), "PLACE|%u|%s|%d|0|H|%d|%s",
+                     id, session_id, row + offset, fleet_lens[offset], token);
+            expect_exact(command, "OK|placed");
+        }
+        snprintf(command, sizeof(command), "READY|%u|%s|%s", id, session_id, token);
+        call(command, response, sizeof(response));
+        if (p == 1) {
+            assert(strcmp(response, "OK|waiting for opponent") == 0);
+        } else {
+            assert(strcmp(response, "OK|game started") == 0);
+        }
+    }
+
+    /* Game restarted successfully in PLAYING phase */
+    assert_view_phase_and_winner(session_id, alice_id, alice_token, "PLAYING", "-");
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "PLAYING", "-");
+}
+
+static void test_p04_exit_and_result_both_participants(void) {
+    char session_id[16], command[256], response[SERVER_RESPONSE_SIZE];
+    server_state_init();
+    setup_started_game(session_id, sizeof(session_id));
+
+    /* Alice surrenders -> Bob wins */
+    snprintf(command, sizeof(command), "SURRENDER|%u|%s|%s", alice_id, session_id, alice_token);
+    expect_exact(command, "OK|SURRENDER|WIN");
+
+    /* 1. Both participants receive final status with over=1 */
+    snprintf(command, sizeof(command), "STATUS|%u|%s|%s", alice_id, session_id, alice_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|Alice|Bob|0|1|1|1", strlen("OK|Alice|Bob|0|1|1|1")) == 0);
+
+    snprintf(command, sizeof(command), "STATUS|%u|%s|%s", bob_id, session_id, bob_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|Alice|Bob|0|1|1|1", strlen("OK|Alice|Bob|0|1|1|1")) == 0);
+
+    /* 2. Both participants receive the winner name in VIEW */
+    assert_view_phase_and_winner(session_id, alice_id, alice_token, "FINISHED", "Bob");
+    assert_view_phase_and_winner(session_id, bob_id, bob_token, "FINISHED", "Bob");
+
+    /* 3. Guest exits via LEAVE -> host remains in lobby waiting for a new request */
+    snprintf(command, sizeof(command), "LEAVE|%u|%s|%s", bob_id, session_id, bob_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|left", 7) == 0);
+
+    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", alice_id, session_id, alice_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|WAITING_REQUEST|HOST|", strlen("OK|WAITING_REQUEST|HOST|")) == 0);
+
+    /* 4. Host exits via LEAVE -> session is cleared */
+    snprintf(command, sizeof(command), "LEAVE|%u|%s|%s", alice_id, session_id, alice_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "OK|left", 7) == 0);
+
+    snprintf(command, sizeof(command), "VIEW|%u|%s|%s", alice_id, session_id, alice_token);
+    call(command, response, sizeof(response));
+    assert(strncmp(response, "ERR|no session", 14) == 0);
+}
+
 int main(void) {
     test_surrender_assigns_winner();
     test_disconnect_pauses_and_reconnects();
@@ -282,6 +367,8 @@ int main(void) {
     test_duplicate_names_and_token_authentication();
     test_resume_after_timeout_and_target_privacy();
     test_accepted_pregame_host_disconnect();
+    test_p03_rematch_end_to_end();
+    test_p04_exit_and_result_both_participants();
     puts("server state regression rules passed");
     return 0;
 }

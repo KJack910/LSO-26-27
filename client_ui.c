@@ -430,6 +430,13 @@ static void session_screen(const char *host, const char *port, const char *pid,
             continue;
         }
         if (strcmp(phase, "FINISHED") == 0) {
+            if (strcmp(winner, "-") != 0) {
+                if (strcmp(winner, player_name) == 0) {
+                    printf("\n%s*** VITTORIA! Congratulazioni, hai vinto la partita! ***%s\n", COL_GREEN, COL_RESET);
+                } else {
+                    printf("\n%s*** SCONFITTA! Tutte le tue navi sono state affondate. ***%s\n", COL_RED, COL_RESET);
+                }
+            }
             if (is_host) {
                 puts("\n=== PARTITA TERMINATA ===\n  D  Rivincita o attesa di un nuovo avversario\n  E  Esci dalla sessione");
                 if (!read_input("Scelta: ", input, sizeof(input))) goto session_done;

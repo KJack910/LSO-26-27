@@ -238,8 +238,10 @@ static void maintenance_locked(time_t now) {
                     
                     if (!session->connected[0] && session->connected[1]) {
                         /* Promote guest to host so they can make the post-game decision, retaining over=1 */
+                        char promoted_name[NAME_LEN];
                         session->host = session->guest;
-                        snprintf(session->host_name, sizeof(session->host_name), "%s", session->guest_name);
+                        snprintf(promoted_name, sizeof(promoted_name), "%s", session->guest_name);
+                        snprintf(session->host_name, sizeof(session->host_name), "%s", promoted_name);
                         session->connected[0] = session->connected[1];
                         session->last_seen[0] = session->last_seen[1];
                         session->guest = 0;
@@ -247,6 +249,10 @@ static void maintenance_locked(time_t now) {
                         session->connected[1] = 0;
                         session->last_seen[1] = 0;
                         session->winner = session->host;
+                        session->board[0] = session->board[1];
+                        memset(&session->board[1], 0, sizeof(session->board[1]));
+                        session->ship_count[0] = session->ship_count[1];
+                        session->ship_count[1] = 0;
                     }
                 } else {
                     session->used = 0;
